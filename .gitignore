@@ -1,0 +1,16 @@
+/target
+.DS_Store
+*.profraw
+/worktrees/
+
+# Instruction files of assistant tools stay local
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+.github/copilot-instructions.md
+.cursorrules
+.windsurfrules
+.claude/
+.cursor/
+.aider*
