@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `ykurctl`: switch the relay and ports of a Yepkit YKUR and read their state.
+//! `ykurctrl`: switch the relay and ports of a Yepkit YKUR and read their state.
 
 mod cli;
 
@@ -10,7 +10,7 @@ use cli::Command;
 use ykur::{Error, Result, Transport, Ykur};
 
 const USAGE: &str = "\
-Usage: ykurctl [-s SERIAL] COMMAND
+Usage: ykurctrl [-s SERIAL] COMMAND
 
   -u PORT      switch on                PORT = 1|2|3|4|r|a
   -d PORT      switch off               PORT = 1|2|3|4|r|a
@@ -18,7 +18,7 @@ Usage: ykurctl [-s SERIAL] COMMAND
   -v           print the firmware version of the board
   -l           list the attached boards
   -s SERIAL    address the board with this serial number
-  --version    print the version of ykurctl
+  --version    print the version of ykurctrl
   -h, --help   print this help
 
 PORT: 1 to 4 are the relay driver ports, r the on-board relay, a all four ports.
@@ -48,7 +48,7 @@ fn run(args: &[String], out: &mut impl Write) -> Result<()> {
     let invocation = cli::parse(args)?;
     match &invocation.command {
         Command::Help => write!(out, "{USAGE}")?,
-        Command::Version => writeln!(out, "ykurctl {}", env!("CARGO_PKG_VERSION"))?,
+        Command::Version => writeln!(out, "ykurctrl {}", env!("CARGO_PKG_VERSION"))?,
         Command::List => print_boards(out, &ykur::list()?)?,
         command => {
             let board = Ykur::open(invocation.serial.as_deref())?;

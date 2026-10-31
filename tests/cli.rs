@@ -4,8 +4,8 @@
 
 use std::process::{Command, Output};
 
-fn ykurctl(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ykurctl"))
+fn ykurctrl(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ykurctrl"))
         .args(args)
         .output()
         .expect("the binary should run")
@@ -13,42 +13,42 @@ fn ykurctl(args: &[&str]) -> Output {
 
 #[test]
 fn help_goes_to_stdout_and_succeeds() {
-    let out = ykurctl(&["-h"]);
+    let out = ykurctrl(&["-h"]);
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("Usage: ykurctl"));
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("Usage: ykurctrl"));
     assert!(out.stderr.is_empty());
 }
 
 #[test]
 fn the_version_names_the_program() {
-    let out = ykurctl(&["--version"]);
+    let out = ykurctrl(&["--version"]);
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        format!("ykurctl {}\n", env!("CARGO_PKG_VERSION"))
+        format!("ykurctrl {}\n", env!("CARGO_PKG_VERSION"))
     );
 }
 
 #[test]
 fn a_usage_error_fails_with_the_reason_and_the_usage_on_stderr() {
-    let out = ykurctl(&["-u", "9"]);
+    let out = ykurctrl(&["-u", "9"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.starts_with("Invalid port 9"));
-    assert!(err.contains("Usage: ykurctl"));
+    assert!(err.contains("Usage: ykurctrl"));
 }
 
 #[test]
 fn no_arguments_is_a_usage_error() {
-    let out = ykurctl(&[]);
+    let out = ykurctrl(&[]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).starts_with("No command given"));
 }
 
 #[test]
 fn an_unknown_serial_fails_without_touching_any_board() {
-    let out = ykurctl(&["-s", "no-such-board", "-g", "r"]);
+    let out = ykurctrl(&["-s", "no-such-board", "-g", "r"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
@@ -58,6 +58,6 @@ fn an_unknown_serial_fails_without_touching_any_board() {
 
 #[test]
 fn terminal_escapes_in_arguments_are_not_echoed() {
-    let out = ykurctl(&["-u", "\u{1b}[31m"]);
+    let out = ykurctrl(&["-u", "\u{1b}[31m"]);
     assert!(!String::from_utf8_lossy(&out.stderr).contains('\u{1b}'));
 }

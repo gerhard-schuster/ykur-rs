@@ -449,11 +449,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ykurctl"
+name = "ykurctrl"
 version = "0.1.0"
 dependencies = [
  "async-hid",
  "async-io",
  "futures-lite",
- "ykurctl",
+ "ykurctrl",
 ]

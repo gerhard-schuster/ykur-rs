@@ -2,7 +2,7 @@
 //! Control library for the Yepkit YKUR USB relay board.
 //!
 //! An independent implementation of the YKUR USB control protocol, written
-//! against Yepkit's datasheet and checked against a board. The `ykurctl`
+//! against Yepkit's datasheet and checked against a board. The `ykurctrl`
 //! binary is a command line front end; a Rust program can drive the board
 //! directly:
 //!

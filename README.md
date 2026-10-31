@@ -18,7 +18,7 @@ cargo install --git https://github.com/gerhard-schuster/ykur-rs --locked
 ### Linux
 
 The board is a file, `/dev/hidrawN`, which belongs to root until a udev rule hands it to a
-group. ykurctl reaches the board only through that node; this rule gives it to `plugdev`:
+group. ykurctrl reaches the board only through that node; this rule gives it to `plugdev`:
 
 ```
 # /etc/udev/rules.d/60-ykur.rules
@@ -37,11 +37,11 @@ Without the rule, every command that opens the board fails and names the rule fi
 ## Using it
 
 ```
-ykurctl [-s SERIAL] -u PORT     switch on
-ykurctl [-s SERIAL] -d PORT     switch off
-ykurctl [-s SERIAL] -g PORT     print whether it is on
-ykurctl [-s SERIAL] -v          print the firmware version of the board
-ykurctl -l                      list the attached boards
+ykurctrl [-s SERIAL] -u PORT     switch on
+ykurctrl [-s SERIAL] -d PORT     switch off
+ykurctrl [-s SERIAL] -g PORT     print whether it is on
+ykurctrl [-s SERIAL] -v          print the firmware version of the board
+ykurctrl -l                      list the attached boards
 ```
 
 PORT is `1` to `4` for the relay driver ports, `r` for the on-board relay, `a` for all four
@@ -84,7 +84,7 @@ Measured on 2026-10-31 against board `YK22170`, firmware 1.2.1, in two runs:
 | Switch off `0A` or `AA` | `02 target FF` | `03 target 02` |
 | Read state of `0A` or `AA` | not documented | `03 target 02` |
 
-Switching itself does what the datasheet says, for every target. So `ykurctl` accepts both
+Switching itself does what the datasheet says, for every target. So `ykurctrl` accepts both
 forms of the echo, treats only status `AA` as a failure and confirms the outcome by reading the
 state of each output, which the board answers as documented. Yepkit's `ykurcmd` reads the
 answer and discards it, so it does not see the difference.
