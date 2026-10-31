@@ -1,0 +1,37 @@
+[package]
+name = "ykurctl"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+description = "Control application for the Yepkit YKUR USB relay board"
+readme = "README.md"
+keywords = ["usb", "relay", "hid", "ykur", "yepkit"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[lib]
+name = "ykur"
+
+[features]
+# The FakeBoard test double, so code built on the library can be tested
+# without hardware. Off by default.
+fake = []
+
+[dependencies]
+# Pinned to upstream main until 0.6.0 is released; that revision has the
+# macOS fixes for input report delivery (sidit77/async-hid#46) and for
+# feature report reads (#53).
+async-hid = { version = "0.6", git = "https://github.com/sidit77/async-hid", rev = "bffec9e0f9f912f3422b2cc9179d369f78417d1d" }
+# block_on and the stream adapter for enumeration; async-io for the timer the
+# read races against, since async-hid has no timed read.
+async-io = "2"
+futures-lite = "2"
+
+[dev-dependencies]
+ykurctl = { path = ".", features = ["fake"] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+codegen-units = 1

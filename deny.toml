@@ -1,0 +1,38 @@
+# Configuration for cargo-deny. Run it with:
+#
+#     cargo install cargo-deny --locked
+#     cargo deny check
+
+[advisories]
+# Anything with a published advisory fails the check.
+yanked = "deny"
+
+[licenses]
+# Exactly the licenses that appear in the tree today. Anything else is meant to
+# fail, so that a new dependency under different terms gets looked at rather
+# than waved through.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # Required rather than chosen: unicode-ident is published as
+    # "(MIT OR Apache-2.0) AND Unicode-3.0", so the third one cannot be
+    # avoided by picking a branch. It reaches the graph through the proc
+    # macros of the windows crates, which this target never builds - the
+    # check spans every target, which is the right default for a program
+    # meant to grow beyond one.
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Two versions of the same crate in one binary is a smell worth seeing.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The transport is pinned to a revision of upstream main until async-hid 0.6.0
+# is released. This is the only git source, and it is meant to disappear again.
+allow-git = ["https://github.com/sidit77/async-hid"]

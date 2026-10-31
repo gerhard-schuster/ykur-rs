@@ -1,0 +1,53 @@
+name: Dependency audit
+
+# Advisories change without the code changing, so this runs on a schedule as
+# well as whenever the dependency set moves. Keeping it out of the per-push CI
+# means a fresh advisory is reported without blocking unrelated work.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/audit.yml
+  workflow_dispatch:
+
+# The job only reads the repository and reports.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Also part of the cache key: bumping the version here is what replaces the
+  # cached binary. The advisory database itself is fetched fresh on every run,
+  # so a pinned cargo-deny still sees new advisories.
+  CARGO_DENY_VERSION: "0.20.2"
+
+jobs:
+  deny:
+    runs-on: macos-latest
+    steps:
+      # Pinned to a commit rather than a tag, and without persisted
+      # credentials, for the same reasons as in ci.yml.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Cache the cargo-deny binary
+        id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ env.CARGO_DENY_VERSION }}
+
+      - name: Install cargo-deny
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+
+      - run: cargo deny check
