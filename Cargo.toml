@@ -27,6 +27,10 @@ async-hid = { version = "0.6", git = "https://github.com/sidit77/async-hid", rev
 async-io = "2"
 futures-lite = "2"
 
+# flock on the hidraw node, so two invocations take turns at a board.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 ykurctrl = { path = ".", features = ["fake"] }
 

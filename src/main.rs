@@ -5,12 +5,13 @@ mod cli;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use cli::Command;
 use ykur::{Error, Result, Transport, Ykur};
 
 const USAGE: &str = "\
-Usage: ykurctrl [-s SERIAL] COMMAND
+Usage: ykurctrl [--no-wait] [-s SERIAL] COMMAND
 
   -u PORT      switch on                PORT = 1|2|3|4|r|a
   -d PORT      switch off               PORT = 1|2|3|4|r|a
@@ -18,6 +19,7 @@ Usage: ykurctrl [-s SERIAL] COMMAND
   -v           print the firmware version of the board
   -l           list the attached boards
   -s SERIAL    address the board with this serial number
+  --no-wait    fail at once if another ykurctrl is using the board (Linux)
   --version    print the version of ykurctrl
   -h, --help   print this help
 
@@ -51,7 +53,12 @@ fn run(args: &[String], out: &mut impl Write) -> Result<()> {
         Command::Version => writeln!(out, "ykurctrl {}", env!("CARGO_PKG_VERSION"))?,
         Command::List => print_boards(out, &ykur::list()?)?,
         command => {
-            let board = Ykur::open(invocation.serial.as_deref())?;
+            let wait = if invocation.no_wait {
+                Duration::ZERO
+            } else {
+                ykur::DEFAULT_WAIT
+            };
+            let board = Ykur::open_within(invocation.serial.as_deref(), wait)?;
             execute(&board, command, out)?;
         }
     }

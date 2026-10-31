@@ -14,6 +14,7 @@ use async_hid::{AsyncHidRead, AsyncHidWrite, Device, DeviceReaderWriter, HidBack
 use futures_lite::{future, StreamExt};
 
 use crate::error::{Error, Result};
+pub use crate::lock::DEFAULT_WAIT;
 use crate::sanitize::sanitize;
 
 /// USB vendor id of the YKUR (YKUR datasheet rev. 1.2.1, 4).
@@ -60,16 +61,50 @@ pub struct Board {
     /// Set when a read timed out. The answer may still arrive afterwards and
     /// would then be queued, so the next exchange empties the queue first.
     stale: Cell<bool>,
+
+    /// This process's turn at the board, see [`crate::lock`]. Declared last
+    /// so that it is dropped last: the next invocation must not get the turn
+    /// while this one still has the device open.
+    #[cfg(target_os = "linux")]
+    _turn: crate::lock::NodeLock,
 }
 
 impl Board {
     /// Opens the board with the given serial number, or the first one found.
+    ///
+    /// On Linux, a board another invocation is using is waited for, up to
+    /// [`DEFAULT_WAIT`]; see [`crate::lock`].
     pub fn open(serial: Option<&str>) -> Result<Self> {
-        let device = future::block_on(choose(serial))?;
+        Board::open_within(serial, DEFAULT_WAIT)
+    }
+
+    /// Like [`Board::open`], waiting at most `wait` for a board another
+    /// invocation is using. With `wait` zero, a board in use fails at once
+    /// with [`Error::Busy`]. On macOS there is no turn to wait for, and
+    /// `wait` has no effect.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    pub fn open_within(serial: Option<&str>, wait: Duration) -> Result<Self> {
+        // The turn first, then the handle, so this process never has the
+        // board open while another one is in the middle of an exchange.
+        #[cfg(target_os = "linux")]
+        let (turn, device) = {
+            let (_, device, turn) = crate::lock::take_stable(
+                wait,
+                || future::block_on(choose(serial)),
+                hidraw_node_of,
+                |node, found, left| crate::lock::NodeLock::take(node, found, left),
+            )?;
+            (turn, device)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (_, device) = future::block_on(choose(serial))?;
+
         let dev = future::block_on(device.open()).map_err(open_failed)?;
         Ok(Board {
             dev: RefCell::new(dev),
             stale: Cell::new(false),
+            #[cfg(target_os = "linux")]
+            _turn: turn,
         })
     }
 
@@ -146,7 +181,7 @@ pub fn list() -> Result<Vec<String>> {
 
 /// What to tell a user whose operating system refused to open the board.
 #[cfg(target_os = "linux")]
-const PERMISSION_DENIED: &str = "Permission denied on the hidraw device of the YKUR. \
+pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the hidraw device of the YKUR. \
 Allow access with a udev rule, /etc/udev/rules.d/60-ykur.rules as shown in the \
 README, make this user a member of the group the rule names, and replug the board";
 #[cfg(not(target_os = "linux"))]
@@ -169,17 +204,52 @@ fn open_failed(error: async_hid::HidError) -> Error {
     }
 }
 
-async fn choose(serial: Option<&str>) -> Result<Device> {
+/// The board with the given serial number, or the first one found, with its
+/// sanitised serial number.
+async fn choose(serial: Option<&str>) -> Result<(String, Device)> {
     let attached = attached_boards().await?;
     let chosen = match serial {
         Some(wanted) => attached.into_iter().find(|(known, _)| known == wanted),
         None => attached.into_iter().next(),
     };
-    chosen
-        .map(|(_, device)| device)
-        .ok_or_else(|| Error::NotFound {
-            serial: serial.map(str::to_owned),
-        })
+    chosen.ok_or_else(|| Error::NotFound {
+        serial: serial.map(str::to_owned),
+    })
+}
+
+/// The hidraw node of a board found by the transport.
+///
+/// On Linux the transport identifies a device by its directory in sysfs,
+/// `.../hidraw/hidrawN`, and opens the node named in the `uevent` file there.
+/// The lock goes on the same node.
+#[cfg(target_os = "linux")]
+fn hidraw_node_of(device: &Device) -> Result<std::path::PathBuf> {
+    let async_hid::DeviceId::DevPath(sysfs) = &device.id else {
+        return Err(Error::Device("The YKUR has no hidraw device".into()));
+    };
+
+    hidraw_node(sysfs).ok_or_else(|| {
+        Error::Device(format!(
+            "No hidraw device node found for the YKUR at {}",
+            sysfs.display()
+        ))
+    })
+}
+
+/// Reads `DEVNAME` from the `uevent` file in a hidraw directory of sysfs and
+/// turns it into the path under `/dev`. Only a plain `hidrawN` is taken, so a
+/// file that says something else cannot point the lock anywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn hidraw_node(sysfs: &std::path::Path) -> Option<std::path::PathBuf> {
+    let uevent = std::fs::read_to_string(sysfs.join("uevent")).ok()?;
+    let name = uevent
+        .lines()
+        .find_map(|line| line.strip_prefix("DEVNAME="))?
+        .trim();
+    let number = name.strip_prefix("hidraw")?;
+
+    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| std::path::Path::new("/dev").join(name))
 }
 
 async fn attached_boards() -> Result<Vec<(String, Device)>> {
@@ -233,9 +303,88 @@ mod tests {
         assert!(matches!(&error, Error::Hid(msg) if msg != PERMISSION_DENIED));
     }
 
+    /// A directory in the temporary directory standing in for sysfs,
+    /// removed again when dropped.
+    struct FakeSysfs(std::path::PathBuf);
+
+    impl FakeSysfs {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("ykur-sysfs-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            FakeSysfs(dir)
+        }
+
+        fn file(&self, path: &str, content: &str) -> &Self {
+            let path = self.0.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+            self
+        }
+    }
+
+    impl Drop for FakeSysfs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_hidraw_node_is_read_from_sysfs() {
+        let sysfs = FakeSysfs::new("node");
+        sysfs.file(
+            "hidraw/hidraw3/uevent",
+            "MAJOR=241\nMINOR=3\nDEVNAME=hidraw3",
+        );
+
+        assert_eq!(
+            hidraw_node(&sysfs.0.join("hidraw/hidraw3")),
+            Some(std::path::PathBuf::from("/dev/hidraw3"))
+        );
+    }
+
+    #[test]
+    fn a_node_name_that_is_not_hidraw_is_refused() {
+        let sysfs = FakeSysfs::new("badnode");
+        sysfs
+            .file("a/uevent", "DEVNAME=../sda")
+            .file("b/uevent", "DEVNAME=hidraw")
+            .file("c/uevent", "DEVNAME=hidraw1/../../sda")
+            .file("d/uevent", "MAJOR=241");
+
+        for dir in ["a", "b", "c", "d", "missing"] {
+            assert_eq!(hidraw_node(&sysfs.0.join(dir)), None, "{dir}");
+        }
+    }
+
     /// Needs a YKUR attached. Run with `cargo test -- --ignored --test-threads=1`.
     mod hardware {
         use super::*;
+
+        /// On Linux a second invocation waits for the first; with no wait
+        /// it is refused as busy. macOS takes no turn, so the second open
+        /// goes through there. Read-only: nothing is sent to the board.
+        #[test]
+        #[ignore = "needs a YKUR attached"]
+        fn a_held_board_is_not_opened_a_second_time() {
+            let first = Board::open(None).expect("the first board should open");
+            let second = Board::open_within(None, Duration::ZERO);
+
+            if cfg!(target_os = "linux") {
+                assert!(
+                    matches!(&second, Err(Error::Busy { .. })),
+                    "a second open should be refused as busy, got {:?}",
+                    second.as_ref().err()
+                );
+            } else {
+                assert!(second.is_ok(), "macOS takes no turn");
+            }
+            drop(second);
+            drop(first);
+            Board::open_within(None, Duration::ZERO)
+                .expect("the board should open again once the first handle is gone");
+        }
 
         #[test]
         #[ignore = "needs a YKUR attached"]

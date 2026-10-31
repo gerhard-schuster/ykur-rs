@@ -25,13 +25,16 @@ compile_error!("ykur is for macOS on Apple silicon and for Linux on aarch64");
 
 mod device;
 mod error;
+mod lock;
 mod sanitize;
 mod ykur;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
-pub use crate::device::{list, Board, Report, Transport, PRODUCT_ID, REPORT_SIZE, VENDOR_ID};
+pub use crate::device::{
+    list, Board, Report, Transport, DEFAULT_WAIT, PRODUCT_ID, REPORT_SIZE, VENDOR_ID,
+};
 pub use crate::error::{Error, Result};
 pub use crate::sanitize::sanitize;
 pub use crate::ykur::{Output, Target, Version, Ykur};

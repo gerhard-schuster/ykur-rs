@@ -455,5 +455,6 @@ dependencies = [
  "async-hid",
  "async-io",
  "futures-lite",
+ "rustix",
  "ykurctrl",
 ]

@@ -109,6 +109,12 @@ impl Ykur<Board> {
     pub fn open(serial: Option<&str>) -> Result<Self> {
         Ok(Ykur::new(Board::open(serial)?))
     }
+
+    /// Like [`Ykur::open`], waiting at most `wait` for a board another
+    /// invocation is using; see [`Board::open_within`].
+    pub fn open_within(serial: Option<&str>, wait: std::time::Duration) -> Result<Self> {
+        Ok(Ykur::new(Board::open_within(serial, wait)?))
+    }
 }
 
 impl<T: Transport> Ykur<T> {

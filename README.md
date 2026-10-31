@@ -37,11 +37,11 @@ Without the rule, every command that opens the board fails and names the rule fi
 ## Using it
 
 ```
-ykurctrl [-s SERIAL] -u PORT     switch on
-ykurctrl [-s SERIAL] -d PORT     switch off
-ykurctrl [-s SERIAL] -g PORT     print whether it is on
-ykurctrl [-s SERIAL] -v          print the firmware version of the board
-ykurctrl -l                      list the attached boards
+ykurctrl [--no-wait] [-s SERIAL] -u PORT     switch on
+ykurctrl [--no-wait] [-s SERIAL] -d PORT     switch off
+ykurctrl [--no-wait] [-s SERIAL] -g PORT     print whether it is on
+ykurctrl [--no-wait] [-s SERIAL] -v          print the firmware version of the board
+ykurctrl -l                                  list the attached boards
 ```
 
 PORT is `1` to `4` for the relay driver ports, `r` for the on-board relay, `a` for all four
@@ -52,10 +52,17 @@ without it the first one is used. The switches are those of Yepkit's `ykurcmd`, 
 Every switching command is confirmed by reading the state back; a target that did not switch is
 an error. The exit code is 0 on success and 1 on any error.
 
-Run one invocation at a time per board. Neither macOS nor Linux refuses a second open, and each
-answer of the board reaches every open handle, so two invocations at once can read each other's
-answers. The echo check turns most of those mix-ups into an error rather than a wrong result,
-but two identical commands cannot be told apart.
+Neither macOS nor Linux refuses a second open, and each answer of the board reaches every open
+handle, so two invocations at once could read each other's answers. On Linux they take turns: an
+invocation takes an advisory `flock` on the board's hidraw node before it opens the board, and a
+second one waits for it, up to five seconds, then fails with "still not available". With
+`--no-wait` it fails at once instead. The kernel drops the lock when the process ends, so there
+is no lock file to clean up. The lock orders every `ykurctrl` and every program built on the
+library; a tool that opens the node without asking is not held back.
+
+On macOS there is no lock: run one invocation at a time per board there. The echo check turns
+most mix-ups into an error rather than a wrong result, but two identical commands cannot be
+told apart.
 
 ## USB control protocol
 
@@ -92,26 +99,30 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 53 tests and a doctest, no board needed
-cargo test -- --ignored --test-threads=1    # 6 more, with a board attached
+cargo test                                  # 70 tests (75 on Linux) and a doctest
+cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
 The hardware tests read the firmware version, switch every output on and off one by one, the
 four ports at once and everything at once, and put the outputs back the way they found them.
-Run them only with nothing attached to the outputs that must not switch.
+Run them only with nothing attached to the outputs that must not switch. Five tests run only on
+Linux and need no board: four take a real `flock` on a file in the temporary directory, the
+fifth checks that a missing node fails at once.
 
 ## Coverage
 
 Line coverage with `-C instrument-coverage`, measured on 2026-10-31 on the Raspberry Pi (Linux
-on aarch64) at commit 46044bd, whose code this README describes:
+on aarch64) with the code this README describes, including taking turns at a board:
 
-| Run | Lines | Missed |
+| Run | Lines (`llvm-cov report`) | Missed |
 |---|---|---|
-| `cargo test` only, no board needed | 83.85 % | 121 of 749 |
-| `cargo test` and the hardware run, board `YK22170` attached | 95.46 % | 34 of 749 |
+| `cargo test` only, no board needed | 85.90 % | 176 of 1248 |
+| `cargo test` and the hardware run, board `YK22170` attached | 94.95 % | 63 of 1248 |
 
-`cli.rs`, `fake.rs` and `sanitize.rs` are at 100 % or one line short in both runs. With the board,
-what stays unreached is:
+Line by line, `llvm-cov show` lists 53 unreached lines for the run with the board: 45 in the
+library and the binary, 8 in tests. `llvm-cov report` counts 10 more, 8 in `lock.rs` and 2 in
+`device.rs`. For `lock.rs` the generic functions are counted per instantiation; for the 2 lines
+in `device.rs` the cause is UNKNOWN. The 45 lines are:
 
 | Place | Why it is not reached |
 |---|---|
@@ -119,11 +130,19 @@ what stays unreached is:
 | `device.rs` - a failing read | needs the board to report a read error |
 | `device.rs` - a truncated read | needs a board that delivers only part of a report |
 | `device.rs` - an open refused for a reason other than an operating system error | needs the transport to fail the open itself |
+| `device.rs` - a board without a hidraw node in sysfs | needs a transport that does not report the sysfs directory, or a `uevent` without `DEVNAME` |
+| `lock.rs` - taking the lock fails for a reason other than a board in use | needs the hidraw node to vanish or refuse opening between being looked up and being locked |
+| `lock.rs` - permission denied on the hidraw node when taking the lock | the Pi has the udev rule in place |
+| `lock.rs` - `flock` interrupted by a signal, or failing otherwise | needs the kernel to fail the call |
 | `error.rs` - conversion of an output error | needs standard output to fail |
-| `main.rs` - `-l` and a command that opens a board, run in the binary | the binary's own tests do not list boards or open one |
+| `main.rs` - `-l`, `--no-wait` and a command that opens a board, run in the binary | the binary's own tests do not list boards or open one |
 | `main.rs` - `unreachable!()` | help, version and listing are handled before a board is opened |
 | `ykur.rs` - the error text naming the four ports or all outputs | needs the board to report an error for those targets |
-| the rest, two lines | failure arms of assertions in tests |
+
+The 8 lines in tests are failure arms of assertions, the branch for macOS in a hardware test, and
+the success path of a test helper whose command is meant to fail.
+Waiting, giving up and `--no-wait` were also checked by hand on the Pi against `flock` from
+util-linux holding the board's hidraw node.
 
 Reproducing it needs the `llvm-tools` component of the toolchain:
 

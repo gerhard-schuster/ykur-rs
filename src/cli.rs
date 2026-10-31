@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command line grammar, compatible with Yepkit's ykurcmd:
-//! `[-s SERIAL] -u|-d PORT`, `[-s SERIAL] -g PORT`, `[-s SERIAL] -v`, plus
-//! `-l`, `--version` and `-h`. PORT is 1 to 4, `r` for the relay or `a` for
+//! `[-s SERIAL] -u|-d PORT`, `[-s SERIAL] -g PORT`, `[-s SERIAL] -v`, each
+//! optionally led by `--no-wait`, plus `-l`, `--version` and `-h`. PORT is 1 to 4, `r` for the relay or `a` for
 //! the four ports.
 
 use ykur::{Error, Output, Result, Target};
@@ -19,6 +19,8 @@ pub enum Command {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub serial: Option<String>,
+    /// Fail at once instead of waiting for a board another invocation holds.
+    pub no_wait: bool,
     pub command: Command,
 }
 
@@ -26,6 +28,11 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
     let mut rest = args.iter().map(String::as_str);
     let mut serial = None;
     let mut first = rest.next();
+
+    let no_wait = first == Some("--no-wait");
+    if no_wait {
+        first = rest.next();
+    }
 
     if first == Some("-s") {
         let value = rest
@@ -54,8 +61,17 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
     if serial.is_some() && !addresses_board {
         return Err(usage("-s only goes with a command that addresses a board"));
     }
+    if no_wait && !addresses_board {
+        return Err(usage(
+            "--no-wait only goes with a command that addresses a board",
+        ));
+    }
 
-    Ok(Invocation { serial, command })
+    Ok(Invocation {
+        serial,
+        no_wait,
+        command,
+    })
 }
 
 fn target(arg: Option<&str>, option: &str) -> Result<Target> {
@@ -138,6 +154,22 @@ mod tests {
             inv.command,
             Command::Switch(Target::One(Output::Relay), true)
         );
+    }
+
+    #[test]
+    fn no_wait_goes_before_the_command() {
+        let inv = parse_str("--no-wait -g r").unwrap();
+        assert!(inv.no_wait);
+        assert_eq!(inv.command, Command::State(Target::One(Output::Relay)));
+        let inv = parse_str("--no-wait -s YK1 -u 1").unwrap();
+        assert!(inv.no_wait);
+        assert_eq!(inv.serial.as_deref(), Some("YK1"));
+        assert!(!parse_str("-g r").unwrap().no_wait);
+    }
+
+    #[test]
+    fn no_wait_with_a_command_that_needs_no_board_is_a_usage_error() {
+        usage_error("--no-wait -l");
     }
 
     #[test]

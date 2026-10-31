@@ -19,6 +19,15 @@ pub enum Error {
     Hid(String),
     /// The board did not answer within the read timeout.
     NoResponse,
+    /// Another invocation had the board, and it did not come free in time.
+    Busy {
+        /// The board, by its serial number.
+        serial: String,
+        /// How long was waited; zero when waiting was not asked for.
+        waited: std::time::Duration,
+        /// Who has the board, as far as can be told.
+        cause: String,
+    },
     /// The board answered, but reported a failure or an unexpected report.
     Device(String),
     /// Writing the output failed.
@@ -35,6 +44,20 @@ impl fmt::Display for Error {
             Error::NotFound { serial: None } => write!(f, "No YKUR board found"),
             Error::Hid(e) => write!(f, "USB HID error: {e}"),
             Error::NoResponse => write!(f, "No response from the board"),
+            Error::Busy {
+                serial,
+                waited,
+                cause,
+            } if waited.is_zero() => write!(f, "The YKUR {serial} is not available: {cause}"),
+            Error::Busy {
+                serial,
+                waited,
+                cause,
+            } => write!(
+                f,
+                "The YKUR {serial} is still not available after {:.1} s: {cause}",
+                waited.as_secs_f64()
+            ),
             Error::Io(e) => write!(f, "Output error: {e}"),
         }
     }
@@ -86,6 +109,23 @@ mod tests {
         assert_eq!(texts[4], "No response from the board");
         assert_eq!(texts[5], "odd answer");
         assert_eq!(texts[6], "Output error: pipe");
+    }
+
+    #[test]
+    fn a_board_in_use_names_the_board_the_wait_and_the_cause() {
+        let held = |ms| Error::Busy {
+            serial: "YK22170".into(),
+            waited: std::time::Duration::from_millis(ms),
+            cause: "another ykurctrl is using it".into(),
+        };
+        assert_eq!(
+            held(5000).to_string(),
+            "The YKUR YK22170 is still not available after 5.0 s: another ykurctrl is using it"
+        );
+        assert_eq!(
+            held(0).to_string(),
+            "The YKUR YK22170 is not available: another ykurctrl is using it"
+        );
     }
 
     #[test]
