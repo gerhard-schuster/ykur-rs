@@ -100,6 +100,43 @@ The hardware tests read the firmware version, switch every output on and off one
 four ports at once and everything at once, and put the outputs back the way they found them.
 Run them only with nothing attached to the outputs that must not switch.
 
+## Coverage
+
+Line coverage with `-C instrument-coverage`, measured on 2026-10-31 on the Raspberry Pi (Linux
+on aarch64) at commit 46044bd, whose code this README describes:
+
+| Run | Lines | Missed |
+|---|---|---|
+| `cargo test` only, no board needed | 83.85 % | 121 of 749 |
+| `cargo test` and the hardware run, board `YK22170` attached | 95.46 % | 34 of 749 |
+
+`cli.rs`, `fake.rs` and `sanitize.rs` are at 100 % or one line short in both runs. With the board,
+what stays unreached is:
+
+| Place | Why it is not reached |
+|---|---|
+| `device.rs` - `Error::NoResponse` and discarding stale answers | needs a board that goes quiet for five seconds |
+| `device.rs` - a failing read | needs the board to report a read error |
+| `device.rs` - a truncated read | needs a board that delivers only part of a report |
+| `device.rs` - an open refused for a reason other than an operating system error | needs the transport to fail the open itself |
+| `error.rs` - conversion of an output error | needs standard output to fail |
+| `main.rs` - `-l` and a command that opens a board, run in the binary | the binary's own tests do not list boards or open one |
+| `main.rs` - `unreachable!()` | help, version and listing are handled before a board is opened |
+| `ykur.rs` - the error text naming the four ports or all outputs | needs the board to report an error for those targets |
+| the rest, two lines | failure arms of assertions in tests |
+
+Reproducing it needs the `llvm-tools` component of the toolchain:
+
+```
+export RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="/tmp/yk/%p-%m.profraw"
+cargo test && cargo test -- --ignored --test-threads=1
+llvm-profdata merge -sparse /tmp/yk/*.profraw -o /tmp/yk/yk.profdata
+llvm-cov report -object target/debug/deps/<every test binary> \
+                -object target/debug/ykurctrl \
+                -instr-profile=/tmp/yk/yk.profdata \
+                -ignore-filename-regex='(\.cargo/|\.rustup/|/rustc/|/tests/)'
+```
+
 ## Checked against the hardware
 
 Board `YK22170`, firmware 1.2.1, nothing attached to its outputs, on 2026-10-31:
@@ -109,6 +146,23 @@ Board `YK22170`, firmware 1.2.1, nothing attached to its outputs, on 2026-10-31:
 | macOS on Apple silicon | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
 | Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64) | the same, with the udev rule from [Linux](#linux) | all pass |
 | Raspberry Pi, without the udev rule | `-l`, then `-g a` | `-l` lists the board; `-g a` exits 1 and names the rule file |
+
+## Where it differs from ykurcmd
+
+Compared with Yepkit's `ykurcmd` (GitHub, commit ae4a095), from its source:
+
+| | `ykurcmd` | `ykurctrl` |
+|---|---|---|
+| Answer to a switching command | read and discarded | echo checked, then the state read back; a target that did not switch is an error |
+| Exit code | 0, whatever happened | 0 on success, 1 on any error |
+| No arguments | prints the help, exit 0 | usage error, exit 1 |
+| `-g a` | "Unable to get status" | the state of the four ports |
+| `-g` output | `Port 1 is ON` | `Port 1: on` |
+| `-v` output | `Firmware Version: Rev.1.2.1` | `Firmware 1.2.1` |
+| `-l` output | `Attached YKUR Boards` and a list | `YKUR boards on this host:` and a numbered list |
+
+The switches themselves, `-s`, `-u`, `-d`, `-g`, `-v` and `-l`, and the ports `1` to `4`, `r`
+and `a` mean the same in both. Several boards without `-s`: both use the first one found.
 
 ## Sources
 
