@@ -4,10 +4,10 @@ Control application and Rust library for the Yepkit YKUR USB relay board: one on
 four relay driver ports, switched over USB HID. An independent implementation written against
 Yepkit's datasheet and checked against a board, not derived from Yepkit's `ykurcmd`.
 
-**For macOS on Apple silicon and Linux on aarch64** (a Raspberry Pi). macOS is run against a
-board; for Linux the code is checked by cross compilation, and CI and a run against a board on a
-Pi are still to come. The source refuses to compile anywhere else. The HID access goes through the `async-hid`
-crate, so a Rust toolchain is the whole requirement.
+**For macOS on Apple silicon and Linux on aarch64** (a Raspberry Pi). Both are built and tested
+in CI and run against a board, see [Checked against the
+hardware](#checked-against-the-hardware). The source refuses to compile anywhere else. The HID
+access goes through the `async-hid` crate, so a Rust toolchain is the whole requirement.
 
 ## Building
 
@@ -97,8 +97,18 @@ cargo test -- --ignored --test-threads=1    # 6 more, with a board attached
 ```
 
 The hardware tests read the firmware version, switch every output on and off one by one, the
-four ports at once and everything at once, and put the outputs back the way they found them. Run them only with nothing attached
-to the outputs that must not switch. All of them pass against `YK22170`.
+four ports at once and everything at once, and put the outputs back the way they found them.
+Run them only with nothing attached to the outputs that must not switch.
+
+## Checked against the hardware
+
+Board `YK22170`, firmware 1.2.1, nothing attached to its outputs, on 2026-10-31:
+
+| System | What was run | Result |
+|---|---|---|
+| macOS on Apple silicon | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
+| Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64) | the same, with the udev rule from [Linux](#linux) | all pass |
+| Raspberry Pi, without the udev rule | `-l`, then `-g a` | `-l` lists the board; `-g a` exits 1 and names the rule file |
 
 ## Sources
 
