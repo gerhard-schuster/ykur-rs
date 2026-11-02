@@ -18,10 +18,11 @@ name = "ykur"
 fake = []
 
 [dependencies]
-# Pinned to upstream main until 0.6.0 is released; that revision has the
-# macOS fixes for input report delivery (sidit77/async-hid#46) and for
+# Pinned to the revision of sidit77/async-hid#55 on the fork until 0.6.0
+# with it is released: #55 adds the exclusive open used on macOS. The
+# revision also has the macOS fixes for input report delivery (#46) and for
 # feature report reads (#53).
-async-hid = { version = "0.6", git = "https://github.com/sidit77/async-hid", rev = "bffec9e0f9f912f3422b2cc9179d369f78417d1d" }
+async-hid = { version = "0.6", git = "https://github.com/gerhard-schuster/async-hid", rev = "1d1a2bf422219b1332f1a46ec4b9b1bc1b29e08e" }
 # block_on and the stream adapter for enumeration; async-io for the timer the
 # read races against, since async-hid has no timed read.
 async-io = "2"

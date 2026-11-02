@@ -19,7 +19,7 @@ pub enum Command {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub serial: Option<String>,
-    /// Fail at once instead of waiting for a board another invocation holds.
+    /// Fail at once instead of waiting for a board that is in use.
     pub no_wait: bool,
     pub command: Command,
 }

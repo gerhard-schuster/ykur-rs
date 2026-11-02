@@ -28,12 +28,13 @@ program:
 - what the relay and the ports switch: the board has no notion of what is
   attached, and neither has this program
 - firmware behaviour of the board itself, which belongs to Yepkit
-- denial of service by holding the device open; on Linux an invocation of
-  this program waits at most five seconds for the lock described below and
+- denial of service by holding the device open; an invocation of this
+  program waits at most five seconds for the board, described below, and
   then gives up
 - interference between programs that have the device open at once, which
-  neither Linux nor macOS prevents; every answer goes to all of them - see
-  below for what this program does about it and what it cannot do
+  Linux does not prevent; every answer goes to all of them. On macOS this
+  program opens the device exclusively. See below for what it does about it
+  and what it cannot do
 
 ## Concurrent use
 
@@ -51,12 +52,16 @@ with a limit.
 
 The rule that follows: **one YKUR tool per host**.
 
-On macOS, concurrent invocations are **not serialized**: the system does
-not refuse a second open, and this program takes no lock there. Run one
-invocation at a time per board. Every switching command is confirmed by
-reading the state back and every answer is checked against its request, so
-most mix-ups end in an error rather than a wrong result; two identical
-commands cannot be told apart.
+On macOS this program opens the device exclusively (seized,
+`Access::Exclusive` from sidit77/async-hid#55). While it holds the device,
+every other open through the HID stack fails, from this program or any
+other, and a second invocation waits for the first. A program that already
+had the device open keeps its handle, but its writes fail while the seize
+lasts. A tool that bypasses the HID stack is not covered. In turn, another
+program that seizes the device makes this one wait and then fail, the
+denial of service above. Measured on 2026-11-02 on a Mac: two invocations
+reading at the same time failed in none of 5080 runs, against about half
+before the exclusive open.
 
 ## What has already been looked at
 

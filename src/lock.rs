@@ -13,12 +13,19 @@
 //!   while the handle the exchange runs over stays as it is. The kernel drops
 //!   the lock when the process ends, however it ends, so there is no lock
 //!   file to leave behind or clean up.
-//! - **macOS** takes no turn: the transport opens the board shared, and there
-//!   is no node to lock. Invocations there have to be run one at a time.
+//! - **macOS** has no node to lock. There the board is opened exclusively
+//!   (seized, `Access::Exclusive` of the transport, sidit77/async-hid#55):
+//!   while one handle holds it, every other open fails with `Busy`, in this
+//!   process and in any other. A refused open is repeated until it goes
+//!   through. The handle is the turn, and closing it - on drop, or when the
+//!   process ends - ends the turn.
 //!
-//! The lock is advisory. It orders the programs that ask for it - every
-//! instance of `ykurctrl`, and any program built on this library - among
-//! themselves. A tool that opens the node without asking is not held back.
+//! On Linux the lock is advisory. It orders the programs that ask for it -
+//! every instance of `ykurctrl`, and any program built on this library -
+//! among themselves. A tool that opens the node without asking is not held
+//! back. On macOS the seize holds back every program that opens the board
+//! through the HID stack, and a program that already had it open loses its
+//! writes while the seize lasts.
 
 use std::time::{Duration, Instant};
 
@@ -35,13 +42,16 @@ use crate::error::{Error, Result};
 /// caller learns that within the same time the read timeout already allows.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(5);
 
+/// What the user is told when the board is held exclusively elsewhere, on
+/// macOS. The system does not say by whom.
+#[cfg(target_os = "macos")]
+pub(crate) const HELD_EXCLUSIVELY: &str = "another program holds it exclusively";
+
 /// Pause between two attempts. Short against the time one invocation holds
 /// the board, long enough that a waiting process does not spin.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const POLL: Duration = Duration::from_millis(10);
 
 /// The outcome of one attempt at getting hold of the board.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum Attempt<T> {
     /// The board is ours until `T` is dropped.
     Got(T),
@@ -56,7 +66,6 @@ pub(crate) enum Attempt<T> {
 ///
 /// With `wait` zero, exactly one attempt is made. `serial` names the board in
 /// the message when waiting runs out.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn wait_for<T>(
     serial: &str,
     wait: Duration,

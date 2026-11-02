@@ -19,7 +19,7 @@ Usage: ykurctrl [--no-wait] [-s SERIAL] COMMAND
   -v           print the firmware version of the board
   -l           list the attached boards
   -s SERIAL    address the board with this serial number
-  --no-wait    fail at once if another ykurctrl is using the board (Linux)
+  --no-wait    fail at once if the board is in use
   --version    print the version of ykurctrl
   -h, --help   print this help
 

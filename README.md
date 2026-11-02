@@ -75,17 +75,28 @@ cause is the setup, and that is what the code says.
 
 The same codes as `ykushctrl` of [ykush-rs](https://github.com/gerhard-schuster/ykush-rs).
 
-Neither macOS nor Linux refuses a second open, and each answer of the board reaches every open
-handle, so two invocations at once could read each other's answers. On Linux they take turns: an
+On Linux a second open is not refused, and each answer of the board reaches every open handle,
+so two invocations at once could read each other's answers. There they take turns: an
 invocation takes an advisory `flock` on the board's hidraw node before it opens the board, and a
 second one waits for it, up to five seconds, then fails with "still not available" (exit 75). With
 `--no-wait` it fails at once instead. The kernel drops the lock when the process ends, so there
 is no lock file to clean up. The lock orders every `ykurctrl` and every program built on the
 library; a tool that opens the node without asking is not held back.
 
-On macOS there is no lock: run one invocation at a time per board there. The echo check turns
-most mix-ups into an error rather than a wrong result, but two identical commands cannot be
-told apart.
+On macOS the board is opened exclusively (seized, `Access::Exclusive` of the transport, from
+sidit77/async-hid#55, pinned until it is released): while one handle holds it, every other open
+fails, in this process and in any other, and is repeated up to five seconds like on Linux; the
+message then reads `another program holds it exclusively`, since the system does not say who.
+The seize also holds back programs that do not know about this one.
+
+Measured on 2026-11-02 on a Mac (Apple silicon) with board `YK22170`, release builds of the
+commit before the exclusive open and of the exclusive open:
+
+| Run | Shared open (before) | Exclusive open |
+|---|---|---|
+| two loops reading ports 1 and 2 at the same time, 2 x 500 | 500 failed, each an answer meant for the other loop (exit 76) | none failed |
+| the same, 2 x 2540 | - | none failed in 5080 runs |
+| the same with `--no-wait`, 2 x 300 | - | 300 succeeded, 300 found the board in use (exit 75), nothing else |
 
 ## USB control protocol
 
@@ -122,7 +133,7 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 79 tests (84 on Linux) and a doctest
+cargo test                                  # 80 tests (85 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
@@ -163,7 +174,8 @@ in `device.rs` the cause is UNKNOWN. The 45 lines are:
 | `main.rs` - `unreachable!()` | help, version and listing are handled before a board is opened |
 | `ykur.rs` - the error text naming the four ports or all outputs | needs the board to report an error for those targets |
 
-The 8 lines in tests are failure arms of assertions, the branch for macOS in a hardware test, and
+The 8 lines in tests are failure arms of assertions, the branch for macOS in a hardware test (since
+removed), and
 the success path of a test helper whose command is meant to fail.
 Waiting, giving up and `--no-wait` were also checked by hand on the Pi against `flock` from
 util-linux holding the board's hidraw node.
@@ -187,9 +199,14 @@ Board `YK22170`, firmware 1.2.1, nothing attached to its outputs, on 2026-10-31:
 These runs predate the exit codes: where they say "exits 1", today's program exits with `77`
 for a denied open.
 
+On 2026-11-02 the board did not appear on the bus when the YKUSH3 port it hangs on was first
+switched on, although it had power; after switching the port off and on again it did. Why is
+UNKNOWN; it was not seen on the Raspberry Pi.
+
 | System | What was run | Result |
 |---|---|---|
-| macOS on Apple silicon | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
+| macOS on Apple silicon, before the exclusive open | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
+| macOS on Apple silicon, 2026-11-02, with the exclusive open, the board on port 3 of a YKUSH3 | the hardware tests; `-u`/`-d` on `r` and `a`; exit status of a usage error and an unknown serial number | all pass; `64` and `69` |
 | Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64) | the same, with the udev rule from [Linux](#linux) | all pass |
 | Raspberry Pi, without the udev rule | `-l`, then `-g a` | `-l` lists the board; `-g a` exits 1 and names the rule file |
 

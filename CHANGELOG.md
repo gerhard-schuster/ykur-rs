@@ -13,3 +13,8 @@ The exit status follows sysexits(3) and says what to do next: `64` invalid comma
 no board, board unreachable or the board reported an error, `74` no answer or transport error,
 `75` board in use, `76` an answer that does not fit the request, `77` access denied; the same
 codes as `ykushctrl`.
+
+Two invocations at once take turns at a board: on Linux through an advisory `flock` on the
+hidraw node, on macOS through an exclusive open (`Access::Exclusive` from sidit77/async-hid#55,
+pinned on the fork until it is released; measured on a Mac with a board). The second one
+waits up to 5 seconds, or fails at once with `--no-wait`.

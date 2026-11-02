@@ -26,7 +26,8 @@ pub enum Error {
     Hid(String),
     /// The board did not answer within the read timeout.
     NoResponse,
-    /// Another invocation had the board, and it did not come free in time.
+    /// Another invocation or, on macOS, another program had the board, and
+    /// it did not come free in time.
     Busy {
         /// The board, by its serial number.
         serial: String,

@@ -10,6 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use async_hid::Access;
 use async_hid::{AsyncHidRead, AsyncHidWrite, Device, DeviceReaderWriter, HidBackend};
 use futures_lite::{future, StreamExt};
 
@@ -55,7 +57,8 @@ pub(crate) fn report(payload: &[u8]) -> Report {
 /// An opened YKUR board.
 pub struct Board {
     /// Every exchange needs the handle mutably while [`Transport`] hands out a
-    /// shared reference; a board is driven from one thread at a time.
+    /// shared reference; a board is driven from one thread at a time. On
+    /// macOS the handle holds the board exclusively.
     dev: RefCell<DeviceReaderWriter>,
 
     /// Set when a read timed out. The answer may still arrive afterwards and
@@ -72,7 +75,7 @@ pub struct Board {
 impl Board {
     /// Opens the board with the given serial number, or the first one found.
     ///
-    /// On Linux, a board another invocation is using is waited for, up to
+    /// A board another invocation is using is waited for, up to
     /// [`DEFAULT_WAIT`]; see [`crate::lock`].
     pub fn open(serial: Option<&str>) -> Result<Self> {
         Board::open_within(serial, DEFAULT_WAIT)
@@ -80,12 +83,10 @@ impl Board {
 
     /// Like [`Board::open`], waiting at most `wait` for a board another
     /// invocation is using. With `wait` zero, a board in use fails at once
-    /// with [`Error::Busy`]. On macOS there is no turn to wait for, and
-    /// `wait` has no effect.
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    /// with [`Error::Busy`].
     pub fn open_within(serial: Option<&str>, wait: Duration) -> Result<Self> {
-        // The turn first, then the handle, so this process never has the
-        // board open while another one is in the middle of an exchange.
+        // Linux: the turn first, then the handle, so this process never has
+        // the board open while another one is in the middle of an exchange.
         #[cfg(target_os = "linux")]
         let (turn, device) = {
             let (_, device, turn) = crate::lock::take_stable(
@@ -96,10 +97,27 @@ impl Board {
             )?;
             (turn, device)
         };
-        #[cfg(not(target_os = "linux"))]
-        let (_, device) = future::block_on(choose(serial))?;
-
+        #[cfg(target_os = "linux")]
         let dev = future::block_on(device.open()).map_err(open_failed)?;
+
+        // macOS: the handle itself is the turn. The board is opened
+        // exclusively (seized), so every other open fails with Busy until
+        // this handle is dropped, and such an open is repeated.
+        #[cfg(target_os = "macos")]
+        let dev = {
+            use crate::lock::Attempt;
+
+            let (found, device) = future::block_on(choose(serial))?;
+            crate::lock::wait_for(&found, wait, || {
+                match future::block_on(device.open_options().access(Access::Exclusive).open()) {
+                    Ok(dev) => Attempt::Got(dev),
+                    Err(error) if refused_as_busy(&error) => {
+                        Attempt::Busy(crate::lock::HELD_EXCLUSIVELY.to_owned())
+                    }
+                    Err(error) => Attempt::Failed(open_failed(error)),
+                }
+            })?
+        };
         Ok(Board {
             dev: RefCell::new(dev),
             stale: Cell::new(false),
@@ -199,6 +217,15 @@ fn open_failed(error: async_hid::HidError) -> Error {
     } else {
         error.into()
     }
+}
+
+/// Whether an open failed because another handle holds the board
+/// exclusively, which waiting may cure. The transport reports exactly that
+/// as `Busy` (`kIOReturnExclusiveAccess` on macOS); every other failure is
+/// reported at once.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn refused_as_busy(error: &async_hid::HidError) -> bool {
+    matches!(error, async_hid::HidError::Busy)
 }
 
 /// The board with the given serial number, or the first one found, with its
@@ -358,6 +385,21 @@ mod tests {
     }
 
     #[test]
+    fn only_busy_from_the_transport_counts_as_a_board_in_use() {
+        use async_hid::HidError;
+
+        assert!(refused_as_busy(&HidError::Busy));
+        assert!(!refused_as_busy(&HidError::message(
+            "Failed to open device"
+        )));
+        assert!(!refused_as_busy(&HidError::NotConnected));
+        assert!(!refused_as_busy(&HidError::Unsupported));
+        assert!(!refused_as_busy(&os_error(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
     fn the_hidraw_node_is_read_from_sysfs() {
         let sysfs = FakeSysfs::new("node");
         sysfs.file(
@@ -389,24 +431,21 @@ mod tests {
     mod hardware {
         use super::*;
 
-        /// On Linux a second invocation waits for the first; with no wait
-        /// it is refused as busy. macOS takes no turn, so the second open
-        /// goes through there. Read-only: nothing is sent to the board.
+        /// A second invocation waits for the first; with no wait it is
+        /// refused as busy. On Linux that is the flock, on macOS the
+        /// exclusive open (passes since 2026-11-02).
+        /// Read-only: nothing is sent to the board.
         #[test]
         #[ignore = "needs a YKUR attached"]
         fn a_held_board_is_not_opened_a_second_time() {
             let first = Board::open(None).expect("the first board should open");
             let second = Board::open_within(None, Duration::ZERO);
 
-            if cfg!(target_os = "linux") {
-                assert!(
-                    matches!(&second, Err(Error::Busy { .. })),
-                    "a second open should be refused as busy, got {:?}",
-                    second.as_ref().err()
-                );
-            } else {
-                assert!(second.is_ok(), "macOS takes no turn");
-            }
+            assert!(
+                matches!(&second, Err(Error::Busy { .. })),
+                "a second open should be refused as busy, got {:?}",
+                second.as_ref().err()
+            );
             drop(second);
             drop(first);
             Board::open_within(None, Duration::ZERO)
