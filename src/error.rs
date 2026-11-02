@@ -24,7 +24,7 @@ pub enum Error {
     /// The HID stack refused the operation. Carries the message only, so the
     /// error type of the HID library does not become part of this interface.
     Hid(String),
-    /// The board did not answer within the read timeout.
+    /// The board did not take a report, or did not answer one, in time.
     NoResponse,
     /// Another invocation or, on macOS, another program had the board, and
     /// it did not come free in time.

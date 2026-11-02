@@ -19,3 +19,9 @@ hidraw node, on macOS through an exclusive open (`Access::Exclusive` from sidit7
 pinned on the fork until it is released; measured on a Mac with a board). The second one
 waits up to 5 seconds, or fails at once with `--no-wait`. The Linux side has not yet run on the
 Raspberry Pi with that pinned revision; its hidraw path is unchanged for the default open.
+
+After the security review in `SECURITY-REVIEW-0.1.0.md`: before its first command, and after an
+exchange that failed or got an answer that does not fit, the program asks for the firmware
+version, drops every report before its answer and waits 50 ms for the queue to stay quiet, so
+an answer left behind by a killed invocation is not read as the answer to the next one. On macOS writes give up after 5 seconds like reads.
+Serial numbers and arguments are printed with everything outside printable ASCII replaced.

@@ -7,13 +7,12 @@
 
 use std::fmt;
 
-use crate::device::{report, Board, Report, Transport};
+use crate::device::{report, Board, Report, Transport, GET_VERSION};
 use crate::error::{Error, Result};
 
 const SWITCH_ON: u8 = 0x01;
 const SWITCH_OFF: u8 = 0x02;
 const GET_STATE: u8 = 0x03;
-const GET_VERSION: [u8; 2] = [0x20, 0x01];
 
 /// Status byte of a failed command (datasheet 4.1.1, 4.1.2).
 const STATUS_ERROR: u8 = 0xAA;
@@ -137,7 +136,7 @@ impl<T: Transport> Ykur<T> {
         // with the state command code instead (measured, see the README).
         let echoed = answer[0] == action || (!on && answer[0] == GET_STATE);
         if !echoed || answer[1] != target.code() {
-            return Err(unexpected("switching", &answer));
+            return Err(self.unexpected("switching", &answer));
         }
         if answer[2] == STATUS_ERROR {
             return Err(Error::Rejected(format!(
@@ -163,7 +162,7 @@ impl<T: Transport> Ykur<T> {
     pub fn state(&self, output: Output) -> Result<bool> {
         let answer = self.exchange(&[GET_STATE, output.code()])?;
         if answer[0] != GET_STATE || answer[1] != output.code() {
-            return Err(unexpected("the state", &answer));
+            return Err(self.unexpected("the state", &answer));
         }
         match answer[2] {
             0x00 => Ok(false),
@@ -171,7 +170,7 @@ impl<T: Transport> Ykur<T> {
             STATUS_ERROR => Err(Error::Rejected(format!(
                 "The board reported an error reading the state of {output}"
             ))),
-            _ => Err(unexpected("the state", &answer)),
+            _ => Err(self.unexpected("the state", &answer)),
         }
     }
 
@@ -179,7 +178,7 @@ impl<T: Transport> Ykur<T> {
     pub fn firmware_version(&self) -> Result<Version> {
         let answer = self.exchange(&GET_VERSION)?;
         if answer[..2] != GET_VERSION {
-            return Err(unexpected("the firmware version", &answer));
+            return Err(self.unexpected("the firmware version", &answer));
         }
         Ok(Version {
             major: answer[2],
@@ -197,6 +196,16 @@ impl<T: Transport> Ykur<T> {
         }
         Ok(answer)
     }
+
+    /// An answer that does not fit its request was probably meant for an
+    /// earlier one, so the transport is told not to trust what it has queued.
+    fn unexpected(&self, what: &str, answer: &Report) -> Error {
+        self.transport.desync();
+        Error::Device(format!(
+            "Unexpected answer to {what}: {:02x} {:02x} {:02x}",
+            answer[0], answer[1], answer[2]
+        ))
+    }
 }
 
 fn describe(target: Target) -> String {
@@ -205,13 +214,6 @@ fn describe(target: Target) -> String {
         Target::Ports => "the four ports".into(),
         Target::All => "all outputs".into(),
     }
-}
-
-fn unexpected(what: &str, answer: &Report) -> Error {
-    Error::Device(format!(
-        "Unexpected answer to {what}: {:02x} {:02x} {:02x}",
-        answer[0], answer[1], answer[2]
-    ))
 }
 
 #[cfg(test)]
@@ -250,6 +252,28 @@ mod tests {
     fn a_version_answer_to_another_command_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x03, 0x01, 0x00]));
         device_error(b.firmware_version());
+    }
+
+    #[test]
+    fn an_answer_that_does_not_fit_puts_the_transport_out_of_step() {
+        let b = board(FakeBoard::new().then(&[0x03, 0x01, 0x00]));
+        device_error(b.firmware_version());
+        assert_eq!(b.transport().desyncs(), 1);
+
+        let b = board(FakeBoard::new().then(&[0x03, 0x02, 0x01]));
+        device_error(b.state(Output::Port(1)));
+        assert_eq!(b.transport().desyncs(), 1);
+
+        let b = board(FakeBoard::new().then(&[0x01, 0x02, 0x00]));
+        device_error(b.switch(Target::One(Output::Port(1)), true));
+        assert_eq!(b.transport().desyncs(), 1);
+    }
+
+    #[test]
+    fn a_fitting_answer_leaves_the_transport_alone() {
+        let b = board(FakeBoard::new().then(&[0x03, 0x01, 0x01]));
+        b.state(Output::Port(1)).unwrap();
+        assert_eq!(b.transport().desyncs(), 0);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use async_hid::Access;
@@ -27,15 +27,23 @@ pub const PRODUCT_ID: u16 = 0xF1CB;
 /// Every YKUR report is 64 bytes (YKUR datasheet rev. 1.2.1, 4).
 pub const REPORT_SIZE: usize = 64;
 
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a write or a read may take before the board counts as not
+/// answering.
+const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long to wait for a late answer when emptying the queue after a read
-/// timed out.
-const DISCARD_WAIT: Duration = Duration::from_millis(50);
+/// How long to wait, after what looks like the answer to the version query,
+/// for another report to follow. Long enough to catch one already on its
+/// way, short enough not to be felt.
+const SETTLE_WAIT: Duration = Duration::from_millis(50);
 
-/// Upper bound on the reports dropped in one go, so a board that streams
-/// cannot hold the program in the drain.
+/// Upper bound on the reports dropped while getting back in step, so a board
+/// that streams cannot hold the program there.
 const DISCARD_LIMIT: usize = 16;
+
+/// The firmware version query (datasheet 4.2.1). It changes nothing on the
+/// board, and no other command is answered with these two bytes, so its
+/// answer marks where the answers to earlier commands end.
+pub(crate) const GET_VERSION: [u8; 2] = [0x20, 0x01];
 
 pub type Report = [u8; REPORT_SIZE];
 
@@ -44,6 +52,10 @@ pub type Report = [u8; REPORT_SIZE];
 pub trait Transport {
     /// Sends a report and returns the report the board answers with.
     fn transfer(&self, out: &Report) -> Result<Report>;
+
+    /// Called when an answer did not fit its request: it may have been meant
+    /// for an earlier one, so the next transfer must not trust the queue.
+    fn desync(&self) {}
 }
 
 /// Pads a command payload to a full report.
@@ -61,9 +73,10 @@ pub struct Board {
     /// macOS the handle holds the board exclusively.
     dev: RefCell<DeviceReaderWriter>,
 
-    /// Set when a read timed out. The answer may still arrive afterwards and
-    /// would then be queued, so the next exchange empties the queue first.
-    stale: Cell<bool>,
+    /// Whether the next report to arrive is the answer to the next command.
+    /// Not so on a fresh handle, which may find an answer an earlier process
+    /// left behind, nor after a failed or unfitting exchange.
+    in_step: Cell<bool>,
 
     /// This process's turn at the board, see [`crate::lock`]. Declared last
     /// so that it is dropped last: the next invocation must not get the turn
@@ -120,67 +133,106 @@ impl Board {
         };
         Ok(Board {
             dev: RefCell::new(dev),
-            stale: Cell::new(false),
+            in_step: Cell::new(false),
             #[cfg(target_os = "linux")]
             _turn: turn,
         })
-    }
-
-    /// Drops reports the board sent after a read had already given up on them.
-    /// Errors are swallowed; the exchange that follows raises them properly.
-    fn discard_queued(&self) {
-        let mut dev = self.dev.borrow_mut();
-        let mut scratch: Report = [0; REPORT_SIZE];
-        for _ in 0..DISCARD_LIMIT {
-            let got = future::block_on(future::or(
-                async { Some(dev.read_input_report(&mut scratch).await) },
-                async {
-                    async_io::Timer::after(DISCARD_WAIT).await;
-                    None
-                },
-            ));
-            if !matches!(got, Some(Ok(_))) {
-                break;
-            }
-        }
     }
 }
 
 impl Transport for Board {
     fn transfer(&self, out: &Report) -> Result<Report> {
-        // An answer to a read that timed out may arrive later and would be
-        // taken for the answer to this command.
-        if self.stale.replace(false) {
-            self.discard_queued();
-        }
+        exchange(&mut *self.dev.borrow_mut(), &self.in_step, out)
+    }
 
-        // The first byte is the report id; the board uses unnumbered reports,
-        // so a leading zero is what it wants.
+    fn desync(&self) {
+        self.in_step.set(false);
+    }
+}
+
+/// One report in each direction, as the transport moves them; `None` when
+/// the time ran out. The exchange below is written against this so that it
+/// can be tested without a board.
+trait Link {
+    fn write(&mut self, out: &Report, timeout: Duration) -> Option<Result<()>>;
+    fn read(&mut self, into: &mut Report, timeout: Duration) -> Option<Result<usize>>;
+}
+
+impl Link for DeviceReaderWriter {
+    fn write(&mut self, out: &Report, timeout: Duration) -> Option<Result<()>> {
+        // The first byte is the report id; the board uses unnumbered
+        // reports, so a leading zero is what it wants.
         let mut buf = [0u8; REPORT_SIZE + 1];
         buf[1..].copy_from_slice(out);
-        future::block_on(self.dev.borrow_mut().write_output_report(&buf))?;
-
-        let mut resp: Report = [0; REPORT_SIZE];
-        let mut dev = self.dev.borrow_mut();
-        // The library has no timed read, so the read races a timer.
-        let read = future::block_on(future::or(
-            async { Some(dev.read_input_report(&mut resp).await) },
+        // The library has no timeouts, so each call races a timer.
+        future::block_on(future::or(
+            async { Some(self.write_output_report(&buf).await.map_err(Error::from)) },
             async {
-                async_io::Timer::after(READ_TIMEOUT).await;
+                async_io::Timer::after(timeout).await;
                 None
             },
-        ));
-        drop(dev);
-
-        match read {
-            None => {
-                self.stale.set(true);
-                Err(Error::NoResponse)
-            }
-            Some(Err(e)) => Err(e.into()),
-            Some(Ok(read)) => full_report(read).map(|()| resp),
-        }
+        ))
     }
+
+    fn read(&mut self, into: &mut Report, timeout: Duration) -> Option<Result<usize>> {
+        future::block_on(future::or(
+            async { Some(self.read_input_report(into).await.map_err(Error::from)) },
+            async {
+                async_io::Timer::after(timeout).await;
+                None
+            },
+        ))
+    }
+}
+
+/// Sends `out` and returns the answer, after getting back in step first when
+/// `in_step` says the queue may hold answers to earlier commands. `in_step`
+/// is set again only by a complete answer.
+fn exchange(link: &mut impl Link, in_step: &Cell<bool>, out: &Report) -> Result<Report> {
+    if !in_step.replace(false) {
+        resync(link)?;
+    }
+    link.write(out, TIMEOUT).ok_or(Error::NoResponse)??;
+
+    let mut answer: Report = [0; REPORT_SIZE];
+    let read = link.read(&mut answer, TIMEOUT).ok_or(Error::NoResponse)??;
+    full_report(read)?;
+    in_step.set(true);
+    Ok(answer)
+}
+
+/// Asks for the firmware version and drops every report up to its answer.
+/// The board answers in order, so whatever was queued before - a late
+/// answer, or one an earlier process left behind - comes first.
+///
+/// A version answer may itself be one left behind, by a process killed
+/// during this very query. Taken too early, the real answer would wait in
+/// the queue for the next command. So the queue has to stay quiet for a
+/// moment after it; another report means the wait goes on.
+fn resync(link: &mut impl Link) -> Result<()> {
+    link.write(&report(&GET_VERSION), TIMEOUT)
+        .ok_or(Error::NoResponse)??;
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut answer: Report = [0; REPORT_SIZE];
+    let mut settling = false;
+    // The reports dropped, the answer, and the quiet after it.
+    for _ in 0..DISCARD_LIMIT + 2 {
+        let wait = if settling {
+            SETTLE_WAIT
+        } else {
+            deadline.saturating_duration_since(Instant::now())
+        };
+        let read = match link.read(&mut answer, wait) {
+            None if settling => return Ok(()),
+            None => return Err(Error::NoResponse),
+            Some(read) => read?,
+        };
+        settling = read == REPORT_SIZE && answer[..2] == GET_VERSION;
+    }
+    Err(Error::Device(format!(
+        "The board sent more than {DISCARD_LIMIT} reports before answering the version query"
+    )))
 }
 
 /// Serial numbers of all attached YKUR boards, in enumeration order.
@@ -334,6 +386,239 @@ mod tests {
         assert_eq!(r.len(), REPORT_SIZE);
         assert_eq!(&r[..2], &[0x01, 0x11]);
         assert!(r[2..].iter().all(|&b| b == 0));
+    }
+
+    /// What a [`FakeLink`] read returns next.
+    enum Incoming {
+        Answer(Report),
+        Short(usize),
+        Fails,
+        Silent,
+    }
+
+    /// A link that records what is written and reads from a prepared queue;
+    /// an empty queue reads as silence.
+    #[derive(Default)]
+    struct FakeLink {
+        written: Vec<Report>,
+        incoming: std::collections::VecDeque<Incoming>,
+        write_hangs: bool,
+    }
+
+    impl FakeLink {
+        fn answers(payloads: &[&[u8]]) -> Self {
+            let mut link = FakeLink::default();
+            for payload in payloads {
+                link.incoming.push_back(Incoming::Answer(report(payload)));
+            }
+            link
+        }
+
+        fn then(mut self, incoming: Incoming) -> Self {
+            self.incoming.push_back(incoming);
+            self
+        }
+
+        fn written(&self) -> Vec<Vec<u8>> {
+            self.written.iter().map(|r| r[..2].to_vec()).collect()
+        }
+    }
+
+    impl Link for FakeLink {
+        fn write(&mut self, out: &Report, _: Duration) -> Option<Result<()>> {
+            if self.write_hangs {
+                return None;
+            }
+            self.written.push(*out);
+            Some(Ok(()))
+        }
+
+        fn read(&mut self, into: &mut Report, _: Duration) -> Option<Result<usize>> {
+            match self.incoming.pop_front().unwrap_or(Incoming::Silent) {
+                Incoming::Answer(r) => {
+                    *into = r;
+                    Some(Ok(REPORT_SIZE))
+                }
+                Incoming::Short(n) => Some(Ok(n)),
+                Incoming::Fails => Some(Err(Error::Hid("read failed".into()))),
+                Incoming::Silent => None,
+            }
+        }
+    }
+
+    const STATE_1: [u8; 2] = [0x03, 0x01];
+    const VERSION: &[u8] = &[0x20, 0x01, 1, 2, 1];
+
+    #[test]
+    fn a_fresh_handle_drops_an_answer_left_behind_by_an_earlier_process() {
+        // A process ended between its write and its read; its answer comes
+        // before anything this one asks.
+        let mut link = FakeLink::answers(&[&[0x03, 0x01, 0x01], VERSION]);
+        link.incoming.push_back(Incoming::Silent);
+        link.incoming
+            .push_back(Incoming::Answer(report(&[0x03, 0x01, 0x00])));
+        let in_step = Cell::new(false);
+
+        let answer = exchange(&mut link, &in_step, &report(&STATE_1)).unwrap();
+
+        assert_eq!(answer[..3], [0x03, 0x01, 0x00]);
+        assert_eq!(link.written(), [GET_VERSION.to_vec(), STATE_1.to_vec()]);
+        assert!(in_step.get());
+    }
+
+    #[test]
+    fn a_version_answer_left_behind_does_not_end_the_resync_early() {
+        // An earlier process was killed during its own version query; taken
+        // for the answer, the real one would be read as the answer to the
+        // command that follows.
+        let mut link = FakeLink::answers(&[VERSION, VERSION]);
+        link.incoming.push_back(Incoming::Silent);
+        link.incoming
+            .push_back(Incoming::Answer(report(&[0x03, 0x01, 0x00])));
+        let in_step = Cell::new(false);
+
+        let answer = exchange(&mut link, &in_step, &report(&STATE_1)).unwrap();
+
+        assert_eq!(answer[..3], [0x03, 0x01, 0x00]);
+        assert!(link.incoming.is_empty());
+    }
+
+    #[test]
+    fn a_handle_in_step_sends_the_command_alone() {
+        let mut link = FakeLink::answers(&[&[0x03, 0x01, 0x01]]);
+        let in_step = Cell::new(true);
+
+        exchange(&mut link, &in_step, &report(&STATE_1)).unwrap();
+
+        assert_eq!(link.written(), [STATE_1.to_vec()]);
+        assert!(in_step.get());
+    }
+
+    #[test]
+    fn every_failed_exchange_leaves_the_handle_out_of_step() {
+        for (what, incoming) in [
+            ("timeout", Incoming::Silent),
+            ("short report", Incoming::Short(10)),
+            ("read error", Incoming::Fails),
+        ] {
+            let mut link = FakeLink::default().then(incoming);
+            let in_step = Cell::new(true);
+
+            assert!(
+                exchange(&mut link, &in_step, &report(&STATE_1)).is_err(),
+                "{what}"
+            );
+            assert!(!in_step.get(), "{what}");
+        }
+    }
+
+    #[test]
+    fn a_late_answer_is_dropped_by_the_next_exchange() {
+        let mut link = FakeLink::default()
+            .then(Incoming::Silent)
+            .then(Incoming::Answer(report(&[0x03, 0x01, 0x01])))
+            .then(Incoming::Answer(report(VERSION)))
+            .then(Incoming::Silent)
+            .then(Incoming::Answer(report(&[0x03, 0x02, 0x00])));
+        let in_step = Cell::new(true);
+
+        assert!(matches!(
+            exchange(&mut link, &in_step, &report(&STATE_1)),
+            Err(Error::NoResponse)
+        ));
+        let answer = exchange(&mut link, &in_step, &report(&[0x03, 0x02])).unwrap();
+
+        assert_eq!(answer[..3], [0x03, 0x02, 0x00]);
+    }
+
+    #[test]
+    fn a_short_report_while_getting_in_step_is_dropped() {
+        let mut link = FakeLink::default()
+            .then(Incoming::Short(2))
+            .then(Incoming::Answer(report(VERSION)))
+            .then(Incoming::Silent)
+            .then(Incoming::Answer(report(&[0x03, 0x01, 0x01])));
+        let in_step = Cell::new(false);
+
+        let answer = exchange(&mut link, &in_step, &report(&STATE_1)).unwrap();
+
+        assert_eq!(answer[..3], [0x03, 0x01, 0x01]);
+    }
+
+    #[test]
+    fn a_read_error_while_getting_in_step_is_reported() {
+        let mut link = FakeLink::default().then(Incoming::Fails);
+        let in_step = Cell::new(false);
+
+        assert!(matches!(
+            exchange(&mut link, &in_step, &report(&STATE_1)),
+            Err(Error::Hid(_))
+        ));
+        assert_eq!(link.written(), [GET_VERSION.to_vec()]);
+        assert!(!in_step.get());
+    }
+
+    #[test]
+    fn a_write_that_does_not_finish_in_time_is_no_response() {
+        let mut link = FakeLink {
+            write_hangs: true,
+            ..FakeLink::default()
+        };
+        let in_step = Cell::new(true);
+
+        assert!(matches!(
+            exchange(&mut link, &in_step, &report(&STATE_1)),
+            Err(Error::NoResponse)
+        ));
+        assert!(!in_step.get());
+    }
+
+    #[test]
+    fn a_board_that_does_not_answer_the_version_query_is_no_response() {
+        let mut link = FakeLink::default();
+        let in_step = Cell::new(false);
+
+        assert!(matches!(
+            exchange(&mut link, &in_step, &report(&STATE_1)),
+            Err(Error::NoResponse)
+        ));
+        assert_eq!(link.written(), [GET_VERSION.to_vec()]);
+        assert!(!in_step.get());
+    }
+
+    #[test]
+    fn as_many_reports_as_the_limit_allows_are_dropped() {
+        let mut link = FakeLink::default();
+        for _ in 0..DISCARD_LIMIT {
+            link.incoming
+                .push_back(Incoming::Answer(report(&[0x03, 0x01, 0x01])));
+        }
+        link.incoming.push_back(Incoming::Answer(report(VERSION)));
+        link.incoming.push_back(Incoming::Silent);
+        link.incoming
+            .push_back(Incoming::Answer(report(&[0x03, 0x01, 0x00])));
+        let in_step = Cell::new(false);
+
+        let answer = exchange(&mut link, &in_step, &report(&STATE_1)).unwrap();
+
+        assert_eq!(answer[..3], [0x03, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn a_board_that_never_gets_to_the_version_answer_is_given_up_on() {
+        let mut link = FakeLink::default();
+        for _ in 0..=DISCARD_LIMIT {
+            link.incoming
+                .push_back(Incoming::Answer(report(&[0x03, 0x01, 0x01])));
+        }
+        link.incoming.push_back(Incoming::Answer(report(VERSION)));
+        let in_step = Cell::new(false);
+
+        assert!(matches!(
+            exchange(&mut link, &in_step, &report(&STATE_1)),
+            Err(Error::Device(_))
+        ));
+        assert!(!in_step.get());
     }
 
     fn os_error(kind: std::io::ErrorKind) -> async_hid::HidError {

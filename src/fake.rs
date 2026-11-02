@@ -6,7 +6,7 @@
 //! The methods panic on misuse, which is right for a test helper; that is why
 //! it sits behind the `fake` feature.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::device::{report, Report, Transport};
@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 pub struct FakeBoard {
     sent: RefCell<Vec<Report>>,
     answers: RefCell<VecDeque<Result<Report>>>,
+    desyncs: Cell<usize>,
 }
 
 impl FakeBoard {
@@ -45,6 +46,11 @@ impl FakeBoard {
             .collect()
     }
 
+    /// How often the protocol layer said the queue cannot be trusted.
+    pub fn desyncs(&self) -> usize {
+        self.desyncs.get()
+    }
+
     /// Whether every prepared answer was used.
     pub fn exhausted(&self) -> bool {
         self.answers.borrow().is_empty()
@@ -58,5 +64,9 @@ impl Transport for FakeBoard {
             .borrow_mut()
             .pop_front()
             .expect("command read from the board although no answer was prepared")
+    }
+
+    fn desync(&self) {
+        self.desyncs.set(self.desyncs.get() + 1);
     }
 }

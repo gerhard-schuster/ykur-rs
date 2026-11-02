@@ -52,6 +52,15 @@ without it the first one is used. The switches are those of Yepkit's `ykurcmd`, 
 Every switching command is confirmed by reading the state back; a target that did not switch is
 an error.
 
+The protocol has no way to tell which request an answer belongs to. So before its first command,
+and after any exchange that failed or got an answer that does not fit, `ykurctrl` asks for the
+firmware version and drops every report that arrives before that answer, then waits 50 ms for
+the queue to stay quiet, since the version answer may itself have been left behind. An answer left
+behind by an invocation that was killed between asking and reading is not taken for the answer to
+this one.
+Every read gives up after 5 seconds, and so does every write on macOS; on Linux the write runs
+inside the kernel, whose USB timeout bounds it.
+
 The exit status tells a script what to do next; the values follow sysexits(3). The codes are a
 stable interface, the wording of the messages is not.
 
@@ -133,7 +142,7 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 80 tests (85 on Linux) and a doctest
+cargo test                                  # 94 tests (99 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
@@ -207,6 +216,7 @@ UNKNOWN.
 |---|---|---|
 | macOS on Apple silicon, before the exclusive open | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
 | macOS on Apple silicon, 2026-11-02, with the exclusive open, the board on port 3 of a YKUSH3 | the hardware tests; `-u`/`-d` on `r` and `a`; exit status of a usage error and an unknown serial number | all pass; `64` and `69` |
+| macOS on Apple silicon, 2026-11-02, with the version query that gets an invocation in step | the hardware tests; `-u`/`-d` on `r` and `a`, read back; two loops of `-g 1` and `-g 2` in parallel, 200 each; `-g 1` 20 times; a state query for port 1 written by a separate program that exits without reading, then `-g 2`, 3 times, with the build before the change and after it | all pass; none failed; median 66 ms; `Port 2: off` and exit 0 with both builds: on macOS the answer left behind did not reach the next invocation in these runs |
 | Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64), before the exclusive open | the same as on macOS before the exclusive open, with the udev rule from [Linux](#linux) | all pass |
 | Raspberry Pi, without the udev rule | `-l`, then `-g a` | `-l` lists the board; `-g a` exits 1 and names the rule file |
 

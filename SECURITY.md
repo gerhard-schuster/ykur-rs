@@ -30,7 +30,12 @@ program:
 - firmware behaviour of the board itself, which belongs to Yepkit
 - denial of service by holding the device open; an invocation of this
   program waits at most five seconds for the board, described below, and
-  then gives up
+  then gives up. Once it has the board, every read gives up after five
+  seconds, and so does every write on macOS; on Linux the write runs
+  inside the kernel, whose USB timeout bounds it rather than this program.
+  An invocation makes several exchanges, the version query included, so a
+  board that stops answering holds it for a bounded time, not for five
+  seconds in all
 - interference between programs that have the device open at once, which
   Linux does not prevent; every answer goes to all of them. On macOS this
   program opens the device exclusively. See below for what it does about it
@@ -64,6 +69,25 @@ denial of service above. Measured on 2026-11-02 on a Mac: two invocations
 reading at the same time failed in none of 5080 runs, against about half
 before the exclusive open.
 
+## Known limitations
+
+- Boards are told apart by serial number. Two boards with the same serial
+  number, or both without one, are listed as one, and `-s` picks whichever
+  the system enumerates first. A board that copies the serial number of
+  another one therefore takes its place. Telling them apart by their
+  position on the bus is possible but not done.
+- The protocol has no request ids. The program gets back in step by
+  asking for the firmware version, dropping every report before its
+  answer and waiting 50 ms for the queue to stay quiet after it, since a
+  version answer may itself have been left behind. An answer that takes
+  longer than that to follow is read by the next command; every command
+  checks its echo, so it is reported (exit `76`) rather than taken for a
+  wrong value, unless that command is itself a version query.
+
 ## What has already been looked at
 
-No security review of this program has been recorded yet.
+[SECURITY-REVIEW-0.1.0.md](SECURITY-REVIEW-0.1.0.md) records the review of
+the trust boundary to the device, the command line, the locking and the
+dependency surface, and what was changed afterwards. It was taken without
+the author's working context, but not by an outside party; it is a record
+of what was examined, not an independent audit.
