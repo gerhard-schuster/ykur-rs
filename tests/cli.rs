@@ -32,7 +32,7 @@ fn the_version_names_the_program() {
 #[test]
 fn a_usage_error_fails_with_the_reason_and_the_usage_on_stderr() {
     let out = ykurctrl(&["-u", "9"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(64));
     assert!(out.stdout.is_empty());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.starts_with("Invalid port 9"));
@@ -42,14 +42,14 @@ fn a_usage_error_fails_with_the_reason_and_the_usage_on_stderr() {
 #[test]
 fn no_arguments_is_a_usage_error() {
     let out = ykurctrl(&[]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(64));
     assert!(String::from_utf8_lossy(&out.stderr).starts_with("No command given"));
 }
 
 #[test]
 fn an_unknown_serial_fails_without_touching_any_board() {
     let out = ykurctrl(&["-s", "no-such-board", "-g", "r"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(69));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         "No YKUR board with serial number no-such-board found\n"

@@ -50,12 +50,35 @@ without it the first one is used. The switches are those of Yepkit's `ykurcmd`, 
 `a` and `-l`, which its manual does not list, with the same meaning; `-g a` is an addition.
 
 Every switching command is confirmed by reading the state back; a target that did not switch is
-an error. The exit code is 0 on success and 1 on any error.
+an error.
+
+The exit status tells a script what to do next; the values follow sysexits(3). The codes are a
+stable interface, the wording of the messages is not.
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `0` | success; also `-l` with no board attached | go on |
+| `64` | invalid command line | correct the call |
+| `69` | no board, unknown serial number, the board gone, no hidraw node, a node that keeps changing, the HID stack cannot list devices; **the board reported an error**: status `AA`, an unknown error (`00`), an output that did not switch | stop, check the board and its connection |
+| `74` | no answer within the timeout, a truncated report, a transport error, output failed | retry |
+| `75` | the board is in use (waited 5 seconds, or `--no-wait`) | retry later |
+| `76` | an answer that does not fit the request: wrong echo, undocumented value | retry; if it recurs, check the board |
+| `77` | access denied (on Linux the udev rule is missing) | fix the setup |
+| `101` | a bug in this program (a Rust panic) | report it |
+
+Every command of `ykurctrl` may be repeated: switching sets a state, the others only read.
+After 74 or 76 the board may have carried out the command before the answer was lost, which a
+repeat does not change. sysexits(3) has no code for a device that reports an error; such an
+answer is valid, not a protocol violation (`76`), so it gets the catch-all `69`. `77` is meant
+for permissions above the file system; a denied device node is a file system matter, but its
+cause is the setup, and that is what the code says.
+
+The same codes as `ykushctrl` of [ykush-rs](https://github.com/gerhard-schuster/ykush-rs).
 
 Neither macOS nor Linux refuses a second open, and each answer of the board reaches every open
 handle, so two invocations at once could read each other's answers. On Linux they take turns: an
 invocation takes an advisory `flock` on the board's hidraw node before it opens the board, and a
-second one waits for it, up to five seconds, then fails with "still not available". With
+second one waits for it, up to five seconds, then fails with "still not available" (exit 75). With
 `--no-wait` it fails at once instead. The kernel drops the lock when the process ends, so there
 is no lock file to clean up. The lock orders every `ykurctrl` and every program built on the
 library; a tool that opens the node without asking is not held back.
@@ -99,7 +122,7 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 70 tests (75 on Linux) and a doctest
+cargo test                                  # 73 tests (78 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
@@ -112,7 +135,8 @@ fifth checks that a missing node fails at once.
 ## Coverage
 
 Line coverage with `-C instrument-coverage`, measured on 2026-10-31 on the Raspberry Pi (Linux
-on aarch64) with the code this README describes, including taking turns at a board:
+on aarch64) at commit 44d21e9, which added taking turns at a board on Linux; later changes are
+not in these numbers:
 
 | Run | Lines (`llvm-cov report`) | Missed |
 |---|---|---|
@@ -160,6 +184,9 @@ llvm-cov report -object target/debug/deps/<every test binary> \
 
 Board `YK22170`, firmware 1.2.1, nothing attached to its outputs, on 2026-10-31:
 
+These runs predate the exit codes: where they say "exits 1", today's program exits with `77`
+for a denied open.
+
 | System | What was run | Result |
 |---|---|---|
 | macOS on Apple silicon | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
@@ -173,8 +200,8 @@ Compared with Yepkit's `ykurcmd` (GitHub, commit ae4a095), from its source:
 | | `ykurcmd` | `ykurctrl` |
 |---|---|---|
 | Answer to a switching command | read and discarded | echo checked, then the state read back; a target that did not switch is an error |
-| Exit code | 0, whatever happened | 0 on success, 1 on any error |
-| No arguments | prints the help, exit 0 | usage error, exit 1 |
+| Exit code | 0, whatever happened | 0 on success, otherwise by what to do next, see [Using it](#using-it) |
+| No arguments | prints the help, exit 0 | usage error, exit 64 |
 | `-g a` | "Unable to get status" | the state of the four ports |
 | `-g` output | `Port 1 is ON` | `Port 1: on` |
 | `-v` output | `Firmware Version: Rev.1.2.1` | `Firmware 1.2.1` |

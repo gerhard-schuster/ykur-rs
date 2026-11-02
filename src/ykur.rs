@@ -140,7 +140,7 @@ impl<T: Transport> Ykur<T> {
             return Err(unexpected("switching", &answer));
         }
         if answer[2] == STATUS_ERROR {
-            return Err(Error::Device(format!(
+            return Err(Error::Rejected(format!(
                 "The board reported an error switching {}",
                 describe(target)
             )));
@@ -150,7 +150,7 @@ impl<T: Transport> Ykur<T> {
         // firmware 1.2.1, so the outcome is read back instead.
         for output in target.outputs() {
             if self.state(output)? != on {
-                return Err(Error::Device(format!(
+                return Err(Error::Rejected(format!(
                     "{output} did not switch {}",
                     if on { "on" } else { "off" }
                 )));
@@ -168,7 +168,7 @@ impl<T: Transport> Ykur<T> {
         match answer[2] {
             0x00 => Ok(false),
             0x01 => Ok(true),
-            STATUS_ERROR => Err(Error::Device(format!(
+            STATUS_ERROR => Err(Error::Rejected(format!(
                 "The board reported an error reading the state of {output}"
             ))),
             _ => Err(unexpected("the state", &answer)),
@@ -191,7 +191,9 @@ impl<T: Transport> Ykur<T> {
     fn exchange(&self, payload: &[u8]) -> Result<Report> {
         let answer = self.transport.transfer(&report(payload))?;
         if answer[0] == UNKNOWN_ERROR {
-            return Err(Error::Device("The board reported an unknown error".into()));
+            return Err(Error::Rejected(
+                "The board reported an unknown error".into(),
+            ));
         }
         Ok(answer)
     }
@@ -228,6 +230,13 @@ mod tests {
         }
     }
 
+    fn rejected<V: fmt::Debug>(result: Result<V>) -> String {
+        match result {
+            Err(Error::Rejected(msg)) => msg,
+            other => panic!("expected the board to report an error, got {other:?}"),
+        }
+    }
+
     // Firmware version (datasheet 4.2.1)
 
     #[test]
@@ -246,7 +255,7 @@ mod tests {
     #[test]
     fn an_unknown_error_answer_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x00]));
-        assert!(device_error(b.firmware_version()).contains("unknown error"));
+        assert!(rejected(b.firmware_version()).contains("unknown error"));
     }
 
     #[test]
@@ -281,7 +290,7 @@ mod tests {
     #[test]
     fn a_state_the_board_reports_as_error_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x03, 0x02, 0xAA]));
-        device_error(b.state(Output::Port(2)));
+        rejected(b.state(Output::Port(2)));
     }
 
     #[test]
@@ -340,7 +349,7 @@ mod tests {
     #[test]
     fn a_switch_the_board_reports_as_error_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x01, 0x04, 0xAA]));
-        device_error(b.switch(Target::One(Output::Port(4)), true));
+        rejected(b.switch(Target::One(Output::Port(4)), true));
         assert!(b.transport().exhausted());
     }
 
@@ -359,7 +368,7 @@ mod tests {
     #[test]
     fn a_switch_answered_with_an_unknown_error_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x00]));
-        device_error(b.switch(Target::One(Output::Relay), false));
+        rejected(b.switch(Target::One(Output::Relay), false));
     }
 
     #[test]
@@ -369,7 +378,7 @@ mod tests {
                 .then(&[0x01, 0x11, 0x00])
                 .then(&[0x03, 0x11, 0x00]),
         );
-        assert!(device_error(b.switch(Target::One(Output::Relay), true)).contains("Relay"));
+        assert!(rejected(b.switch(Target::One(Output::Relay), true)).contains("Relay"));
     }
 
     #[test]
@@ -415,7 +424,7 @@ mod tests {
             let on = output != Output::Port(3);
             fake = fake.then(&[0x03, output.code(), u8::from(on)]);
         }
-        assert!(device_error(board(fake).switch(Target::All, true)).contains("Port 3"));
+        assert!(rejected(board(fake).switch(Target::All, true)).contains("Port 3"));
     }
 
     /// Needs a YKUR attached and nothing on its outputs that must not switch.

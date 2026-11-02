@@ -160,10 +160,7 @@ impl Transport for Board {
                 Err(Error::NoResponse)
             }
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(read)) if read != REPORT_SIZE => Err(Error::Device(format!(
-                "Truncated answer from the board: {read} of {REPORT_SIZE} bytes"
-            ))),
-            Some(Ok(_)) => Ok(resp),
+            Some(Ok(read)) => full_report(read).map(|()| resp),
         }
     }
 }
@@ -185,7 +182,7 @@ pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the hidraw devi
 Allow access with a udev rule, /etc/udev/rules.d/60-ykur.rules as shown in the \
 README, make this user a member of the group the rule names, and replug the board";
 #[cfg(not(target_os = "linux"))]
-const PERMISSION_DENIED: &str = "Permission denied on the YKUR";
+pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the YKUR";
 
 /// Turns a refused open into an error that says what to do about it. On
 /// Linux the board is `/dev/hidrawN`, owned by root until a udev rule says
@@ -198,7 +195,7 @@ fn open_failed(error: async_hid::HidError) -> Error {
         _ => false,
     };
     if denied {
-        Error::Hid(PERMISSION_DENIED.to_owned())
+        Error::PermissionDenied
     } else {
         error.into()
     }
@@ -225,11 +222,11 @@ async fn choose(serial: Option<&str>) -> Result<(String, Device)> {
 #[cfg(target_os = "linux")]
 fn hidraw_node_of(device: &Device) -> Result<std::path::PathBuf> {
     let async_hid::DeviceId::DevPath(sysfs) = &device.id else {
-        return Err(Error::Device("The YKUR has no hidraw device".into()));
+        return Err(Error::Unavailable("The YKUR has no hidraw device".into()));
     };
 
     hidraw_node(sysfs).ok_or_else(|| {
-        Error::Device(format!(
+        Error::Unavailable(format!(
             "No hidraw device node found for the YKUR at {}",
             sysfs.display()
         ))
@@ -257,7 +254,12 @@ async fn attached_boards() -> Result<Vec<(String, Device)>> {
     let backend = BACKEND.get_or_init(HidBackend::default);
 
     let mut found: Vec<(String, Device)> = Vec::new();
-    let mut devices = backend.enumerate().await?;
+    // A HID stack that cannot even list its devices is an unavailable
+    // service, not an I/O error that a retry would cure.
+    let mut devices = backend
+        .enumerate()
+        .await
+        .map_err(|e| Error::Unavailable(format!("Cannot list the HID devices: {e}")))?;
     while let Some(dev) = devices.next().await {
         if dev.vendor_id != VENDOR_ID || dev.product_id != PRODUCT_ID {
             continue;
@@ -271,9 +273,33 @@ async fn attached_boards() -> Result<Vec<(String, Device)>> {
     Ok(found)
 }
 
+/// A report shorter than 64 bytes is a failed transfer: the read came back
+/// short, and reading the zero padding of the buffer as answer bytes would
+/// turn it into a wrong answer. It is an I/O error, not an answer that does
+/// not fit the request.
+fn full_report(read: usize) -> Result<()> {
+    if read == REPORT_SIZE {
+        Ok(())
+    } else {
+        Err(Error::Hid(format!(
+            "Truncated answer from the board: {read} of {REPORT_SIZE} bytes"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_truncated_report_is_an_io_error_not_an_unfitting_answer() {
+        assert!(full_report(REPORT_SIZE).is_ok());
+        for read in [0, 1, REPORT_SIZE - 1] {
+            let error = full_report(read).unwrap_err();
+            assert!(matches!(error, Error::Hid(_)), "{read}: {error:?}");
+            assert_eq!(error.exit_code(), 74);
+        }
+    }
 
     #[test]
     fn a_report_is_the_payload_padded_with_zeros() {
@@ -290,7 +316,8 @@ mod tests {
     #[test]
     fn a_refused_open_says_what_to_do_about_it() {
         let error = open_failed(os_error(std::io::ErrorKind::PermissionDenied));
-        assert!(matches!(&error, Error::Hid(msg) if msg == PERMISSION_DENIED));
+        assert!(matches!(&error, Error::PermissionDenied));
+        assert_eq!(error.to_string(), PERMISSION_DENIED);
         #[cfg(target_os = "linux")]
         assert!(error
             .to_string()

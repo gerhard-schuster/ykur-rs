@@ -35,13 +35,13 @@ fn main() -> ExitCode {
 
     match run(&args, &mut out) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(Error::Usage(msg)) => {
-            let _ = writeln!(io::stderr(), "{msg}\n\n{USAGE}");
-            ExitCode::FAILURE
-        }
         Err(err) => {
-            let _ = writeln!(io::stderr(), "{err}");
-            ExitCode::FAILURE
+            if let Error::Usage(msg) = &err {
+                let _ = writeln!(io::stderr(), "{msg}\n\n{USAGE}");
+            } else {
+                let _ = writeln!(io::stderr(), "{err}");
+            }
+            ExitCode::from(err.exit_code())
         }
     }
 }
