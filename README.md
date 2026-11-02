@@ -201,13 +201,13 @@ for a denied open.
 
 On 2026-11-02 the board did not appear on the bus when the YKUSH3 port it hangs on was first
 switched on, although it had power; after switching the port off and on again it did. Why is
-UNKNOWN; it was not seen on the Raspberry Pi.
+UNKNOWN.
 
 | System | What was run | Result |
 |---|---|---|
 | macOS on Apple silicon, before the exclusive open | the hardware tests; `-l`, `-v`, `-g`, `-u` and `-d` on every port, `r` and `a`; `-s` | all pass |
 | macOS on Apple silicon, 2026-11-02, with the exclusive open, the board on port 3 of a YKUSH3 | the hardware tests; `-u`/`-d` on `r` and `a`; exit status of a usage error and an unknown serial number | all pass; `64` and `69` |
-| Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64) | the same, with the udev rule from [Linux](#linux) | all pass |
+| Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64), before the exclusive open | the same as on macOS before the exclusive open, with the udev rule from [Linux](#linux) | all pass |
 | Raspberry Pi, without the udev rule | `-l`, then `-g a` | `-l` lists the board; `-g a` exits 1 and names the rule file |
 
 ## Where it differs from ykurcmd

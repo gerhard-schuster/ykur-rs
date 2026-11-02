@@ -17,4 +17,5 @@ codes as `ykushctrl`.
 Two invocations at once take turns at a board: on Linux through an advisory `flock` on the
 hidraw node, on macOS through an exclusive open (`Access::Exclusive` from sidit77/async-hid#55,
 pinned on the fork until it is released; measured on a Mac with a board). The second one
-waits up to 5 seconds, or fails at once with `--no-wait`.
+waits up to 5 seconds, or fails at once with `--no-wait`. The Linux side has not yet run on the
+Raspberry Pi with that pinned revision; its hidraw path is unchanged for the default open.
