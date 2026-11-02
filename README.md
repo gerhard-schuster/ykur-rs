@@ -122,7 +122,7 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 73 tests (78 on Linux) and a doctest
+cargo test                                  # 79 tests (84 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
@@ -216,4 +216,7 @@ The vendor documents are not kept here; they belong to Yepkit. See [doc/README.m
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE). [NOTICE](NOTICE) says where the protocol comes from and
+how this program relates to Yepkit's `ykurcmd`; [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
+lists the crates in the binary with their licenses. How to report a vulnerability, and what
+is in scope, is in [SECURITY.md](SECURITY.md).

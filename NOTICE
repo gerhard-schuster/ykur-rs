@@ -1,0 +1,49 @@
+ykurctrl
+Copyright 2026 Gerhard Schuster
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+
+Where the protocol comes from
+-----------------------------
+
+This program speaks to the same hardware as ykurcmd, the control application
+Yepkit publishes for their YKUR relay board:
+
+    https://github.com/Yepkit/ykurcmd
+    Copyright (c) 2016 Yepkit Lda (its LICENSE.md)
+
+The protocol this program speaks was implemented from Yepkit's YKUR datasheet,
+rev. 1.2.1, listed in doc/README.md, and then checked against a board, where
+firmware 1.2.1 answers some commands differently from the datasheet (see the
+README). It was not derived from the source of ykurcmd. That source was read
+afterwards, only to describe how the two programs behave differently. What the
+two share is the protocol, which both must speak because the hardware requires
+it, and the letters of the command line switches. Facts and interfaces of that
+kind are not what copyright protects, so this notice is here because the work
+deserves crediting, not because a license compels it.
+
+Nothing was taken from that source: no source file, no line of the help text
+and no message the program prints. Every string literal of ykurcmd (its .cpp
+and .h files, without the bundled hidapi) was compared with every string
+literal of this program, escapes resolved and case ignored. None is shared.
+The longest common pieces are terms of the hardware - "serial number" and
+"firmware version", with a neighbouring word at most 20 characters.
+
+Yepkit Lda has neither endorsed nor reviewed this work and does not support it.
+Their trademarks and product names are used only to say which hardware this
+program drives.
+
+The behaviour differs from the original; the table "Where it differs from
+ykurcmd" in the README lists how.
+
+
+Third party components
+----------------------
+
+No third party C library is vendored or linked. The program reaches the device
+through Apple's IOKit framework on macOS and through the kernel's hidraw
+interface on Linux, from Rust.
+
+Every crate that goes into the binary is under MIT or Apache-2.0 terms; they
+are listed with their licenses in THIRD-PARTY-NOTICES.md.
