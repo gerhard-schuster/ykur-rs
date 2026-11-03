@@ -27,13 +27,15 @@ version, drops every report before its answer and waits 50 ms for the queue to s
 an answer left behind by a killed invocation is not read as the answer to the next one. On macOS writes give up after 5 seconds like reads.
 Serial numbers and arguments are printed with everything outside printable ASCII replaced.
 
-A waiting invocation keeps waiting while the board comes back from a reset by the program that
-held it, on macOS and FreeBSD, instead of giving up with "not found"; on FreeBSD, while the
-board is held, only its own node is opened again, so other programs do not fail to open their
-own devices with `EBUSY` meanwhile. Without `-s`, FreeBSD takes the first board by node even
-while it is held, and `-l` lists the boards in that order. A board unplugged after it was opened
-ends with `69` where the transport reports it as disconnected; on Linux the pinned revision
-reports it as `ENODEV`, which still ends with `74`. Measured with a YKUR: on a Mac, a board
-held while its power was switched off and on was got by 4 of 4 waiting invocations after about
-2.1 s, where before all gave up after 0.8 s; on FreeBSD in a VM, other programs failed to open
-their devices 23 times in 3000 opens while an invocation waited, and none with the change.
+A waiting invocation keeps waiting while the board comes back from a reset or a power cycle
+while another program held it, on macOS and FreeBSD, up to the end of the wait; on FreeBSD,
+while the board is held, only its own node is opened again, so other programs do not fail to
+open their own devices with `EBUSY` meanwhile. Without `-s`, FreeBSD takes the first board by
+the path of its device node even while it is held, and `-l` lists the boards in that order. A
+board unplugged after it was opened ends with `69` where the transport reports it as
+disconnected; on Linux the pinned revision reports it as `ENODEV`, which ends with `74`.
+Measured with a YKUR on a Mac: a board held while its power was switched off and on was got by 4
+of 4 waiting invocations after about 2.1 s. Measured on FreeBSD in a VM: no other program failed
+to open its device in 3000 opens while an invocation waited, against 23 failures with the
+earlier listing on every attempt; the wait across a re-enumeration was measured there with a
+reset YKUSH3 only, with a 15 s wait, since the board takes about 5 s to come back in the VM.

@@ -164,7 +164,7 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 95 tests (100 on Linux) and a doctest
+cargo test                                  # 106 tests (111 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
