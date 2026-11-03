@@ -121,11 +121,31 @@ impl Board {
             use crate::lock::Attempt;
 
             let (found, device) = future::block_on(choose(serial))?;
+            // None while the board re-enumerates, e.g. reset by the holder.
+            let mut device = Some(device);
+            // Once it was held elsewhere, the holder may have reset it.
+            let mut may_reset = false;
             crate::lock::wait_for(&found, wait, || {
-                match future::block_on(device.open_options().access(Access::Exclusive).open()) {
+                let current = match device.take() {
+                    Some(current) => current,
+                    None => match future::block_on(choose(Some(&found))) {
+                        Ok((_, again)) => again,
+                        Err(error @ Error::NotFound { .. }) => return Attempt::Gone(error),
+                        Err(error) => return Attempt::Failed(error),
+                    },
+                };
+                match future::block_on(current.open_options().access(Access::Exclusive).open()) {
                     Ok(dev) => Attempt::Got(dev),
                     Err(error) if refused_as_busy(&error) => {
+                        device = Some(current);
+                        may_reset = true;
                         Attempt::Busy(crate::lock::HELD_EXCLUSIVELY.to_owned())
+                    }
+                    // IOKit names a vanished or returning board in several ways.
+                    Err(error)
+                        if may_reset || matches!(error, async_hid::HidError::NotConnected) =>
+                    {
+                        Attempt::Gone(open_failed(error))
                     }
                     Err(error) => Attempt::Failed(open_failed(error)),
                 }
@@ -138,32 +158,62 @@ impl Board {
         let dev = {
             use crate::lock::{Attempt, HELD_OPEN};
 
-            crate::lock::wait_for(serial.unwrap_or_default(), wait, || match future::block_on(
-                choose(serial),
-            ) {
-                Ok((_, device)) => match future::block_on(device.open()) {
-                    Ok(dev) => Attempt::Got(dev),
-                    Err(error) if refused_as_busy(&error) => Attempt::Busy(HELD_OPEN.to_owned()),
-                    Err(error) => Attempt::Failed(open_failed(error)),
-                },
-                Err(error @ Error::NotFound { .. }) => {
-                    let Some((_, node)) = held_board(serial) else {
-                        return Attempt::Failed(error);
+            // Without a serial number, the first board by node, held or not.
+            let first = serial
+                .is_none()
+                .then(|| held_board(None))
+                .flatten()
+                .map(|(found, _)| found);
+            let serial = serial.or(first.as_deref());
+
+            let open = |device: Device| match future::block_on(device.open()) {
+                Ok(dev) => Attempt::Got(dev),
+                Err(error) if refused_as_busy(&error) => Attempt::Busy(HELD_OPEN.to_owned()),
+                Err(error @ async_hid::HidError::NotConnected) => Attempt::Gone(error.into()),
+                Err(error) => Attempt::Failed(open_failed(error)),
+            };
+            // Once the board is missing from the list, only its node is tried.
+            let mut held: Option<(String, std::path::PathBuf)> = None;
+            // Once it was gone, e.g. reset by the holder, it may be coming back.
+            let mut gone = false;
+            crate::lock::wait_for(serial.unwrap_or_default(), wait, || {
+                let outcome = 'attempt: {
+                    let (found, node) = match held.take() {
+                        Some(board) => board,
+                        None => match future::block_on(choose(serial)) {
+                            Ok((_, device)) => break 'attempt open(device),
+                            Err(error @ Error::NotFound { .. }) => match held_board(serial) {
+                                Some(board) => board,
+                                None if gone => break 'attempt Attempt::Gone(error),
+                                None => break 'attempt Attempt::Failed(error),
+                            },
+                            Err(error) => break 'attempt Attempt::Failed(error),
+                        },
                     };
-                    // Listing skips a node it can not open, held or forbidden alike.
-                    match std::fs::File::open(node) {
-                        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                            Attempt::Failed(Error::PermissionDenied)
+                    let device = future::block_on(node_device(&node, &found));
+                    held = Some((found, node));
+                    match device {
+                        Ok(device) => open(device),
+                        Err(error) if refused_as_busy(&error) => {
+                            Attempt::Busy(HELD_OPEN.to_owned())
                         }
-                        _ => Attempt::Busy(HELD_OPEN.to_owned()),
+                        Err(error @ async_hid::HidError::NotConnected) => {
+                            Attempt::Gone(error.into())
+                        }
+                        Err(error) => Attempt::Failed(open_failed(error)),
                     }
+                };
+                if let Attempt::Gone(_) = outcome {
+                    gone = true;
+                    held = None;
                 }
-                Err(error) => Attempt::Failed(error),
+                outcome
             })
             .map_err(|error| match error {
                 Error::Busy { waited, cause, .. } => Error::Busy {
                     serial: held_board(serial)
                         .map(|(found, _)| found)
+                        .or_else(|| serial.map(str::to_owned))
                         .unwrap_or_default(),
                     waited,
                     cause,
@@ -278,16 +328,20 @@ fn resync(link: &mut impl Link) -> Result<()> {
 
 /// Serial numbers of all attached YKUR boards, in enumeration order.
 pub fn list() -> Result<Vec<String>> {
-    #[allow(unused_mut)]
-    let mut serials: Vec<String> = future::block_on(attached_boards())?
+    let attached = future::block_on(attached_boards())?
         .into_iter()
-        .map(|(serial, _)| serial)
-        .collect();
+        .map(|(serial, _)| serial);
     // A board another program has open is missing from the device list.
     #[cfg(target_os = "freebsd")]
-    for (held, _) in hidraw_boards() {
-        if !serials.contains(&held) {
-            serials.push(held);
+    let attached = hidraw_boards()
+        .into_iter()
+        .map(|(serial, _)| serial)
+        .chain(attached);
+
+    let mut serials: Vec<String> = Vec::new();
+    for serial in attached {
+        if !serials.contains(&serial) {
+            serials.push(serial);
         }
     }
     Ok(serials)
@@ -375,7 +429,8 @@ fn hidraw_boards() -> Vec<(String, std::path::PathBuf)> {
     let Ok(dev) = std::fs::read_dir("/dev") else {
         return Vec::new();
     };
-    dev.filter_map(|e| e.ok()?.file_name().into_string().ok())
+    let mut boards: Vec<_> = dev
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter(|name| name.starts_with("hidraw"))
         .filter_map(|hidraw| {
             // hidraw sits on hidbus, which sits on the USB driver.
@@ -384,7 +439,25 @@ fn hidraw_boards() -> Vec<(String, std::path::PathBuf)> {
             let serial = ykur_serial(&sysctl(format!("{}.%pnpinfo", node(&usb)))?)?;
             Some((serial, std::path::Path::new("/dev").join(hidraw)))
         })
-        .collect()
+        .collect();
+    // In the node order of the device list.
+    boards.sort_by(|a, b| a.1.cmp(&b.1));
+    boards
+}
+
+/// The board `serial` on `node`, read without listing the other nodes.
+#[cfg(target_os = "freebsd")]
+async fn node_device(node: &std::path::Path, serial: &str) -> async_hid::HidResult<Device> {
+    let id = async_hid::DeviceId::DevPath(node.to_path_buf());
+    backend()
+        .query_devices(&id)
+        .await?
+        .find(|dev| {
+            dev.vendor_id == VENDOR_ID
+                && dev.product_id == PRODUCT_ID
+                && sanitize(dev.serial_number.as_deref().unwrap_or("<unknown>")) == serial
+        })
+        .ok_or(async_hid::HidError::NotConnected)
 }
 
 /// The board with `serial`, or any board, among those with a hidraw node.
@@ -443,14 +516,17 @@ fn hidraw_node(sysfs: &std::path::Path) -> Option<std::path::PathBuf> {
         .then(|| std::path::Path::new("/dev").join(name))
 }
 
-async fn attached_boards() -> Result<Vec<(String, Device)>> {
+/// One backend for the process, made once instead of per call.
+fn backend() -> &'static HidBackend {
     static BACKEND: OnceLock<HidBackend> = OnceLock::new();
-    let backend = BACKEND.get_or_init(HidBackend::default);
+    BACKEND.get_or_init(HidBackend::default)
+}
 
+async fn attached_boards() -> Result<Vec<(String, Device)>> {
     let mut found: Vec<(String, Device)> = Vec::new();
     // A HID stack that cannot even list its devices is an unavailable
     // service, not an I/O error that a retry would cure.
-    let mut devices = backend
+    let mut devices = backend()
         .enumerate()
         .await
         .map_err(|e| Error::Unavailable(format!("Cannot list the HID devices: {e}")))?;
