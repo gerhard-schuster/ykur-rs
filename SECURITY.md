@@ -57,6 +57,11 @@ with a limit.
 
 The rule that follows: **one YKUR tool per host**.
 
+On FreeBSD hidraw lets one program open a node at a time, so the open is
+the turn and holds back every program that opens the node; a program that
+keeps it open makes this one wait and then fail, as above. While waiting,
+the device list is read every 10 ms, which opens every hidraw node briefly.
+
 On macOS this program opens the device exclusively (seized,
 `Access::Exclusive` from sidit77/async-hid#55). While it holds the device,
 every other open through the HID stack fails, from this program or any

@@ -4,10 +4,11 @@ Control application and Rust library for the Yepkit YKUR USB relay board: one on
 four relay driver ports, switched over USB HID. An independent implementation written against
 Yepkit's datasheet and checked against a board, not derived from Yepkit's `ykurcmd`.
 
-**For macOS on Apple silicon and Linux on aarch64** (a Raspberry Pi). Both are built and tested
-in CI and run against a board, see [Checked against the
-hardware](#checked-against-the-hardware). The source refuses to compile anywhere else. The HID
-access goes through the `async-hid` crate, so a Rust toolchain is the whole requirement.
+**For macOS on Apple silicon and Linux and FreeBSD on aarch64** (a Raspberry Pi, FreeBSD 15.1 in
+a VM). All three are run against a board, macOS and Linux also built and tested in CI, see
+[Checked against the hardware](#checked-against-the-hardware). The source refuses to compile
+anywhere else. The HID access goes through the `async-hid` crate, so a Rust toolchain is the
+whole requirement.
 
 ## Building
 
@@ -33,6 +34,26 @@ sudo usermod -aG plugdev "$USER"      # takes effect at the next login
 ```
 
 Without the rule, every command that opens the board fails and names the rule file.
+
+### FreeBSD
+
+The board is `/dev/hidrawN` here too. It needs the `hidraw` module and the newer USB HID driver,
+and a devfs rule that hands the nodes to a group, here `operator` (the rule covers every hidraw
+node, devfs can not tell boards apart):
+
+```
+# /boot/loader.conf
+hidraw_load="YES"
+hw.usb.usbhid.enable="1"
+
+# /etc/devfs.rules, then devfs_system_ruleset="hidraw" in /etc/rc.conf
+[hidraw=10]
+add path 'hidraw*' mode 0660 group operator
+```
+
+hidraw lets one program open a node at a time, so that open is the turn, and a second invocation
+waits for it. A board another program has open is missing from the device list; `ykurctrl` finds
+it through `sysctl` and waits for it, and `-l` lists it.
 
 ## Using it
 
@@ -96,7 +117,8 @@ On macOS the board is opened exclusively (seized, `Access::Exclusive` of the tra
 sidit77/async-hid#55, pinned until it is released): while one handle holds it, every other open
 fails, in this process and in any other, and is repeated up to five seconds like on Linux; the
 message then reads `another program holds it exclusively`, since the system does not say who.
-The seize also holds back programs that do not know about this one.
+The seize also holds back programs that do not know about this one. On FreeBSD the open itself is
+the turn, and the message reads `another program has it open`.
 
 Measured on 2026-11-02 on a Mac (Apple silicon) with board `YK22170`, release builds of the
 commit before the exclusive open and of the exclusive open:
@@ -142,7 +164,7 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 94 tests (99 on Linux) and a doctest
+cargo test                                  # 95 tests (100 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
@@ -218,6 +240,7 @@ UNKNOWN.
 | macOS on Apple silicon, 2026-11-02, with the exclusive open, the board on port 3 of a YKUSH3 | the hardware tests; `-u`/`-d` on `r` and `a`; exit status of a usage error and an unknown serial number | all pass; `64` and `69` |
 | macOS on Apple silicon, 2026-11-02, with the version query that gets an invocation in step | the hardware tests; `-u`/`-d` on `r` and `a`, read back; two loops of `-g 1` and `-g 2` in parallel, 200 each; `-g 1` 20 times; a state query for port 1 written by a separate program that exits without reading, then `-g 2`, 3 times, with the build before the change and after it | all pass; none failed; median 66 ms; `Port 2: off` and exit 0 with both builds: on macOS the answer left behind did not reach the next invocation in these runs |
 | Raspberry Pi 4 Model B, Debian 13, kernel 6.18 (aarch64), before the exclusive open | the same as on macOS before the exclusive open, with the udev rule from [Linux](#linux) | all pass |
+| FreeBSD 15.1 (aarch64) in a VMware Fusion VM, 2026-11-03, the board on port 3 of a YKUSH3 | the hardware tests; `-u`/`-d` on `r` and `a`; two loops of `-g 1` and `-g 2` in parallel, 200 each; the node held open by another process; no access to the node; an unknown serial number | all pass; none failed; `--no-wait` exits `75`, a waiting call goes through once it is free, `-l` still lists the board; `77`; `69` |
 | Raspberry Pi, without the udev rule | `-l`, then `-g a` | `-l` lists the board; `-g a` exits 1 and names the rule file |
 
 ## Where it differs from ykurcmd

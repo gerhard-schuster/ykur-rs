@@ -131,6 +131,47 @@ impl Board {
                 }
             })?
         };
+        // FreeBSD: hidraw takes one open at a time, so the handle is the turn
+        // as on macOS. Listing opens the node too, so a held board is missing
+        // from the list rather than refused.
+        #[cfg(target_os = "freebsd")]
+        let dev = {
+            use crate::lock::{Attempt, HELD_OPEN};
+
+            crate::lock::wait_for(serial.unwrap_or_default(), wait, || match future::block_on(
+                choose(serial),
+            ) {
+                Ok((_, device)) => match future::block_on(device.open()) {
+                    Ok(dev) => Attempt::Got(dev),
+                    Err(error) if refused_as_busy(&error) => Attempt::Busy(HELD_OPEN.to_owned()),
+                    Err(error) => Attempt::Failed(open_failed(error)),
+                },
+                Err(error @ Error::NotFound { .. }) => {
+                    let Some((_, node)) = held_board(serial) else {
+                        return Attempt::Failed(error);
+                    };
+                    // Listing skips a node it can not open, held or forbidden alike.
+                    match std::fs::File::open(node) {
+                        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                            Attempt::Failed(Error::PermissionDenied)
+                        }
+                        _ => Attempt::Busy(HELD_OPEN.to_owned()),
+                    }
+                }
+                Err(error) => Attempt::Failed(error),
+            })
+            .map_err(|error| match error {
+                Error::Busy { waited, cause, .. } => Error::Busy {
+                    serial: held_board(serial)
+                        .map(|(found, _)| found)
+                        .unwrap_or_default(),
+                    waited,
+                    cause,
+                },
+                error => error,
+            })?
+        };
+
         Ok(Board {
             dev: RefCell::new(dev),
             in_step: Cell::new(false),
@@ -237,13 +278,19 @@ fn resync(link: &mut impl Link) -> Result<()> {
 
 /// Serial numbers of all attached YKUR boards, in enumeration order.
 pub fn list() -> Result<Vec<String>> {
-    future::block_on(async {
-        Ok(attached_boards()
-            .await?
-            .into_iter()
-            .map(|(serial, _)| serial)
-            .collect())
-    })
+    #[allow(unused_mut)]
+    let mut serials: Vec<String> = future::block_on(attached_boards())?
+        .into_iter()
+        .map(|(serial, _)| serial)
+        .collect();
+    // A board another program has open is missing from the device list.
+    #[cfg(target_os = "freebsd")]
+    for (held, _) in hidraw_boards() {
+        if !serials.contains(&held) {
+            serials.push(held);
+        }
+    }
+    Ok(serials)
 }
 
 /// What to tell a user whose operating system refused to open the board.
@@ -251,7 +298,11 @@ pub fn list() -> Result<Vec<String>> {
 pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the hidraw device of the YKUR. \
 Allow access with a udev rule, /etc/udev/rules.d/60-ykur.rules as shown in the \
 README, make this user a member of the group the rule names, and replug the board";
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "freebsd")]
+pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the hidraw device of the YKUR. \
+Allow access with a devfs.rules entry as shown in the README and make this user a member of \
+the group it names";
+#[cfg(target_os = "macos")]
 pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the YKUR";
 
 /// Turns a refused open into an error that says what to do about it. On
@@ -275,9 +326,73 @@ fn open_failed(error: async_hid::HidError) -> Error {
 /// exclusively, which waiting may cure. The transport reports exactly that
 /// as `Busy` (`kIOReturnExclusiveAccess` on macOS); every other failure is
 /// reported at once.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn refused_as_busy(error: &async_hid::HidError) -> bool {
     matches!(error, async_hid::HidError::Busy)
+}
+
+/// The serial number of a YKUR in the `%pnpinfo` of a FreeBSD USB device, or
+/// `None` for any other device.
+#[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
+fn ykur_serial(pnpinfo: &str) -> Option<String> {
+    let field = |key: &str| {
+        pnpinfo
+            .split_whitespace()
+            .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+    };
+    let hex = |key: &str| u16::from_str_radix(field(key)?.strip_prefix("0x")?, 16).ok();
+
+    (hex("vendor")? == VENDOR_ID && hex("product")? == PRODUCT_ID).then(|| {
+        match field("sernum").unwrap_or("").trim_matches('"') {
+            // Named as the device list names a board without one.
+            "" => "<unknown>".to_owned(),
+            sernum => sanitize(sernum),
+        }
+    })
+}
+
+/// The serial numbers and nodes of all YKUR boards with a hidraw node, read
+/// through sysctl: listing opens the node, and FreeBSD lets one handle open
+/// it at a time, so a board another program has open is missing from the
+/// list.
+#[cfg(target_os = "freebsd")]
+fn hidraw_boards() -> Vec<(String, std::path::PathBuf)> {
+    let sysctl = |name: String| {
+        let out = std::process::Command::new("/sbin/sysctl")
+            .args(["-n", &name])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    // "hidbus3" names the sysctl node "dev.hidbus.3".
+    let node = |dev: &str| {
+        let unit = dev.trim_start_matches(|c: char| !c.is_ascii_digit());
+        format!("dev.{}.{unit}", &dev[..dev.len() - unit.len()])
+    };
+
+    let Ok(dev) = std::fs::read_dir("/dev") else {
+        return Vec::new();
+    };
+    dev.filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("hidraw"))
+        .filter_map(|hidraw| {
+            // hidraw sits on hidbus, which sits on the USB driver.
+            let hidbus = sysctl(format!("{}.%parent", node(&hidraw)))?;
+            let usb = sysctl(format!("{}.%parent", node(&hidbus)))?;
+            let serial = ykur_serial(&sysctl(format!("{}.%pnpinfo", node(&usb)))?)?;
+            Some((serial, std::path::Path::new("/dev").join(hidraw)))
+        })
+        .collect()
+}
+
+/// The board with `serial`, or any board, among those with a hidraw node.
+#[cfg(target_os = "freebsd")]
+fn held_board(serial: Option<&str>) -> Option<(String, std::path::PathBuf)> {
+    hidraw_boards()
+        .into_iter()
+        .find(|(found, _)| serial.is_none_or(|wanted| found == wanted))
 }
 
 /// The board with the given serial number, or the first one found, with its
@@ -369,6 +484,17 @@ fn full_report(read: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_board_is_recognised_in_the_pnp_info_of_freebsd() {
+        let ykur = r#"vendor=0x04d8 product=0xf1cb devclass=0x00 sernum="YK22170" release=0x0100"#;
+        assert_eq!(ykur_serial(ykur), Some("YK22170".to_owned()));
+        let mouse = r#"vendor=0x0e0f product=0x0003 sernum="" release=0x0102"#;
+        assert_eq!(ykur_serial(mouse), None);
+        let unnamed = r#"vendor=0x04d8 product=0xf1cb sernum="""#;
+        assert_eq!(ykur_serial(unnamed), Some("<unknown>".to_owned()));
+        assert_eq!(ykur_serial("pci0:0:0:0"), None);
+    }
 
     #[test]
     fn a_truncated_report_is_an_io_error_not_an_unfitting_answer() {

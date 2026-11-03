@@ -5,9 +5,9 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
 ## Unreleased
 
 First version. `ykurctrl` switches the relay and the four ports of a YKUR, reads their state
-and the firmware version, and lists the attached boards, on macOS on Apple silicon and Linux on
-aarch64, both run against a board. Switching is confirmed by reading the state back, since
-firmware 1.2.1 answers switching commands differently from the datasheet.
+and the firmware version, and lists the attached boards, on macOS on Apple silicon and Linux and
+FreeBSD on aarch64, all three run against a board. Switching is confirmed by reading the state
+back, since firmware 1.2.1 answers switching commands differently from the datasheet.
 
 The exit status follows sysexits(3) and says what to do next: `64` invalid command line, `69`
 no board, board unreachable or the board reported an error, `74` no answer or transport error,
@@ -15,7 +15,8 @@ no board, board unreachable or the board reported an error, `74` no answer or tr
 codes as `ykushctrl`.
 
 Two invocations at once take turns at a board: on Linux through an advisory `flock` on the
-hidraw node, on macOS through an exclusive open (`Access::Exclusive` from sidit77/async-hid#55,
+hidraw node, on FreeBSD through the open itself, since hidraw allows one at a time, on macOS
+through an exclusive open (`Access::Exclusive` from sidit77/async-hid#55,
 pinned on the fork until it is released; measured on a Mac with a board). The second one
 waits up to 5 seconds, or fails at once with `--no-wait`. The Linux side has not yet run on the
 Raspberry Pi with that pinned revision; its hidraw path is unchanged for the default open.

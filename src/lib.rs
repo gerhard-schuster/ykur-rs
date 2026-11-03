@@ -17,11 +17,14 @@
 //! # }
 //! ```
 
-// Built and run against a board on macOS on Apple silicon and on Linux on
-// aarch64 (a Raspberry Pi); elsewhere it refuses to compile rather than produce
-// a binary nobody has tried.
-#[cfg(not(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux"))))]
-compile_error!("ykur is for macOS on Apple silicon and for Linux on aarch64");
+// Built and run against a board on macOS on Apple silicon and on Linux and
+// FreeBSD on aarch64; elsewhere it refuses to compile rather than produce a
+// binary nobody has tried.
+#[cfg(not(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "freebsd")
+)))]
+compile_error!("ykur is for macOS on Apple silicon and for Linux and FreeBSD on aarch64");
 
 mod device;
 mod error;
