@@ -5,6 +5,16 @@ use std::fmt;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// What Linux hidraw reports for a device that is gone.
+pub(crate) const ENODEV: i32 = 19;
+/// What FreeBSD reports for a node whose device is gone: `hidraw_detach` calls
+/// `destroy_dev`, from then on `devfs_read_f` and `devfs_write_f` fall back to
+/// the vnode, and `dead_read` and `dead_write` answer with it
+/// (`sys/dev/hid/hidraw.c`, `sys/fs/devfs/devfs_vnops.c`,
+/// `sys/fs/deadfs/dead_vnops.c`, releng/15.1; read in the source, not measured
+/// with a board).
+const ENXIO: i32 = 6;
+
 /// Not exhaustive: a new way to fail is not a breaking change for a caller
 /// that already handles the ones it knows.
 #[derive(Debug)]
@@ -80,6 +90,10 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    pub(crate) fn no_longer_connected() -> Self {
+        Error::Unavailable("The YKUR is no longer connected".into())
+    }
+
     /// The exit status for this error, after sysexits(3), chosen by what
     /// the caller should do next:
     ///
@@ -123,11 +137,26 @@ impl std::error::Error for Error {
 
 impl From<async_hid::HidError> for Error {
     /// A board that is no longer connected is unavailable, not an I/O error
-    /// that a retry would cure.
+    /// that a retry would cure. On Linux, hidraw reports a device unplugged
+    /// after it was opened as `ENODEV` (19), and a missing udev rule as
+    /// `EACCES` (`PermissionDenied`). On FreeBSD a call inside the driver
+    /// gets `EIO`, which the transport reports as `Disconnected`, and any
+    /// later one `ENXIO` (6).
     fn from(e: async_hid::HidError) -> Self {
         match e {
             async_hid::HidError::NotConnected | async_hid::HidError::Disconnected => {
-                Error::Unavailable("The YKUR is no longer connected".into())
+                Error::no_longer_connected()
+            }
+            async_hid::HidError::Other(ref inner) => {
+                if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+                    if io.kind() == std::io::ErrorKind::PermissionDenied {
+                        return Error::PermissionDenied;
+                    }
+                    if matches!(io.raw_os_error(), Some(ENODEV | ENXIO)) {
+                        return Error::no_longer_connected();
+                    }
+                }
+                Error::Hid(e.to_string())
             }
             e => Error::Hid(e.to_string()),
         }
@@ -149,6 +178,8 @@ mod tests {
         for gone in [
             async_hid::HidError::NotConnected,
             async_hid::HidError::Disconnected,
+            async_hid::HidError::from(std::io::Error::from_raw_os_error(19)),
+            async_hid::HidError::from(std::io::Error::from_raw_os_error(6)),
         ] {
             let error = Error::from(gone);
             assert!(matches!(error, Error::Unavailable(_)), "{error:?}");

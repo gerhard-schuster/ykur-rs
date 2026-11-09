@@ -66,9 +66,11 @@ ykurctrl -l                                  list the attached boards
 ```
 
 PORT is `1` to `4` for the relay driver ports, `r` for the on-board relay, `a` for all four
-ports (the relay is left alone). `-s` picks a board by serial number when several are attached;
-without it the first one is used. The switches are those of Yepkit's `ykurcmd`, including
-`a` and `-l`, which its manual does not list, with the same meaning; `-g a` is an addition.
+ports (the relay is left alone), `everything` for the four ports and the relay. `-s` picks a board by
+serial number when several are attached; without it the first one is used. `--no-wait` and `-s`
+go before the command, in either order, each at most once. The switches are
+those of Yepkit's `ykurcmd`, including `a` and `-l`, which its manual does not list, with the
+same meaning; `-g a` and `everything` are additions. A `man(1)` page is in [`man/ykurctrl.1`](man/ykurctrl.1).
 
 Every switching command is confirmed by reading the state back; a target that did not switch is
 an error.
@@ -80,17 +82,20 @@ the queue to stay quiet, since the version answer may itself have been left behi
 behind by an invocation that was killed between asking and reading is not taken for the answer to
 this one.
 Every read gives up after 5 seconds, and so does every write on macOS; on Linux the write runs
-inside the kernel, whose USB timeout bounds it.
+inside the kernel, whose USB timeout bounds it. On FreeBSD the write runs inside the kernel too,
+which waits at most 5 seconds for an interrupt OUT transfer and can return before the board took
+the report (FreeBSD 15.1 source, not measured; whether the board has that endpoint was not
+checked).
 
 The exit status tells a script what to do next; the values follow sysexits(3). The codes are a
 stable interface, the wording of the messages is not.
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `0` | success; also `-l` with no board attached | go on |
+| `0` | success; also `-l` with no board attached, and a reader of the output that closed the pipe early (`\| head -n 1`) | go on |
 | `64` | invalid command line | correct the call |
 | `69` | no board, unknown serial number, the board gone, no hidraw node, a node that keeps changing, the HID stack cannot list devices; **the board reported an error**: status `AA`, an unknown error (`00`), an output that did not switch | stop, check the board and its connection |
-| `74` | no answer within the timeout, a truncated report, a transport error, output failed | retry |
+| `74` | no answer within the timeout, a truncated report, a transport error, output failed other than by a closed pipe | retry |
 | `75` | the board is in use (waited 5 seconds, or `--no-wait`) | retry later |
 | `76` | an answer that does not fit the request: wrong echo, undocumented value | retry; if it recurs, check the board |
 | `77` | access denied (on Linux the udev rule is missing) | fix the setup |
@@ -164,26 +169,29 @@ answer and discards it, so it does not see the difference.
 ## Tests
 
 ```
-cargo test                                  # 106 tests (111 on Linux) and a doctest
+cargo test                                  # 115 tests (121 on Linux) and a doctest
 cargo test -- --ignored --test-threads=1    # 7 more, with a board attached
 ```
 
 The hardware tests read the firmware version, switch every output on and off one by one, the
 four ports at once and everything at once, and put the outputs back the way they found them.
-Run them only with nothing attached to the outputs that must not switch. Five tests run only on
+Run them only with nothing attached to the outputs that must not switch. Six tests run only on
 Linux and need no board: four take a real `flock` on a file in the temporary directory, the
-fifth checks that a missing node fails at once.
+fifth checks that a missing node fails at once, the sixth what a node whose device is gone means.
 
 ## Coverage
 
-Line coverage with `-C instrument-coverage`, measured on 2026-10-31 on the Raspberry Pi (Linux
-on aarch64) at commit 44d21e9, which added taking turns at a board on Linux; later changes are
-not in these numbers:
+Line coverage with `-C instrument-coverage`. Each run names where and when it was measured; the
+Raspberry Pi (Linux on aarch64) runs are at commit 44d21e9, which added taking turns at a board
+on Linux, the macOS run is on the code of the commit that adds its row. Changes after a run are
+not in its numbers, and the runs count different totals, so their percentages do not compare
+directly:
 
 | Run | Lines (`llvm-cov report`) | Missed |
 |---|---|---|
-| `cargo test` only, no board needed | 85.90 % | 176 of 1248 |
-| `cargo test` and the hardware run, board `YK22170` attached | 94.95 % | 63 of 1248 |
+| `cargo test` only, no board needed, though boards were attached, which reaches the enumeration (macOS on Apple silicon, 2026-11-09, Rust 1.99.0) | 89.69 % | 182 of 1766 |
+| `cargo test` only, no board needed (Raspberry Pi, 2026-10-31 at 44d21e9) | 85.90 % | 176 of 1248 |
+| `cargo test` and the hardware run, board `YK22170` attached (Raspberry Pi, 2026-10-31 at 44d21e9) | 94.95 % | 63 of 1248 |
 
 Line by line, `llvm-cov show` lists 53 unreached lines for the run with the board: 45 in the
 library and the binary, 8 in tests. `llvm-cov report` counts 10 more, 8 in `lock.rs` and 2 in
@@ -253,6 +261,7 @@ Compared with Yepkit's `ykurcmd` (GitHub, commit ae4a095), from its source:
 | Exit code | 0, whatever happened | 0 on success, otherwise by what to do next, see [Using it](#using-it) |
 | No arguments | prints the help, exit 0 | usage error, exit 64 |
 | `-g a` | "Unable to get status" | the state of the four ports |
+| `-d all` | takes the first character only, so the same as `-d a`: the four ports | refused, exit 64; `everything` also switches the relay |
 | `-g` output | `Port 1 is ON` | `Port 1: on` |
 | `-v` output | `Firmware Version: Rev.1.2.1` | `Firmware 1.2.1` |
 | `-l` output | `Attached YKUR Boards` and a list | `YKUR boards on this host:` and a numbered list |

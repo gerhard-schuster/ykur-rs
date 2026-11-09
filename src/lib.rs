@@ -17,6 +17,8 @@
 //! # }
 //! ```
 
+#![forbid(unsafe_code)]
+
 // Built and run against a board on macOS on Apple silicon and on Linux and
 // FreeBSD on aarch64; elsewhere it refuses to compile rather than produce a
 // binary nobody has tried.

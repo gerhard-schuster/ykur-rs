@@ -7,12 +7,17 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
 First version. `ykurctrl` switches the relay and the four ports of a YKUR, reads their state
 and the firmware version, and lists the attached boards, on macOS on Apple silicon and Linux and
 FreeBSD on aarch64, all three run against a board. Switching is confirmed by reading the state
-back, since firmware 1.2.1 answers switching commands differently from the datasheet.
+back, since firmware 1.2.1 answers switching commands differently from the datasheet. `a`
+addresses the four ports as in `ykurcmd`, `everything` the four ports and the relay; `all` is
+refused, since `ykurcmd` takes it for the four ports. The manual page
+is in `man/ykurctrl.1`. The minimum supported Rust is 1.98, the first version with a standard
+library published for `aarch64-unknown-freebsd`, so CI can check all three systems with it.
 
 The exit status follows sysexits(3) and says what to do next: `64` invalid command line, `69`
 no board, board unreachable or the board reported an error, `74` no answer or transport error,
 `75` board in use, `76` an answer that does not fit the request, `77` access denied; the same
-codes as `ykushctrl`.
+codes as `ykushctrl`. A reader of the output that closes the pipe early is not an error and
+ends with `0`.
 
 Two invocations at once take turns at a board: on Linux through an advisory `flock` on the
 hidraw node, on FreeBSD through the open itself, since hidraw allows one at a time, on macOS
@@ -32,8 +37,8 @@ while another program held it, on macOS and FreeBSD, up to the end of the wait; 
 while the board is held, only its own node is opened again, so other programs do not fail to
 open their own devices with `EBUSY` meanwhile. Without `-s`, FreeBSD takes the first board by
 the path of its device node even while it is held, and `-l` lists the boards in that order. A
-board unplugged after it was opened ends with `69` where the transport reports it as
-disconnected; on Linux the pinned revision reports it as `ENODEV`, which ends with `74`.
+board unplugged after it was opened ends with `69` (`NotConnected`, `Disconnected`, `ENODEV` on
+Linux, or `ENXIO` on FreeBSD, the latter from the FreeBSD 15.1 source, not measured).
 Measured with a YKUR on a Mac: a board held while its power was switched off and on was got by 4
 of 4 waiting invocations after about 2.1 s. Measured on FreeBSD in a VM: no other program failed
 to open its device in 3000 opens while an invocation waited, against 23 failures with the

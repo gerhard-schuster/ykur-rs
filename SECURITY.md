@@ -33,6 +33,10 @@ program:
   then gives up. Once it has the board, every read gives up after five
   seconds, and so does every write on macOS; on Linux the write runs
   inside the kernel, whose USB timeout bounds it rather than this program.
+  On FreeBSD the write runs inside the kernel too, which waits at most five
+  seconds for an interrupt OUT transfer and can return before the board took
+  the report (FreeBSD 15.1 source, not measured; whether the board has that
+  endpoint was not checked).
   An invocation makes several exchanges, the version query included, so a
   board that stops answering holds it for a bounded time, not for five
   seconds in all
@@ -94,6 +98,7 @@ before the exclusive open.
 
 [SECURITY-REVIEW-0.1.0.md](SECURITY-REVIEW-0.1.0.md) records the review of
 the trust boundary to the device, the command line, the locking and the
-dependency surface, and what was changed afterwards. It was taken without
-the author's working context, but not by an outside party; it is a record
-of what was examined, not an independent audit.
+dependency surface, and what was changed afterwards. The first review was
+taken without the author's working context; for its update that is not
+recorded. Neither was by an outside party; it is a record of what was
+examined, not an independent audit.

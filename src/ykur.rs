@@ -22,8 +22,14 @@ const UNKNOWN_ERROR: u8 = 0x00;
 /// One switchable output of the board.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Output {
-    /// One of the four relay driver ports, 1 to 4.
-    Port(u8),
+    /// Relay driver port 1.
+    Port1,
+    /// Relay driver port 2.
+    Port2,
+    /// Relay driver port 3.
+    Port3,
+    /// Relay driver port 4.
+    Port4,
     /// The on-board relay.
     Relay,
 }
@@ -31,16 +37,19 @@ pub enum Output {
 impl Output {
     /// Every output, in the order they are reported.
     pub const ALL: [Output; 5] = [
-        Output::Port(1),
-        Output::Port(2),
-        Output::Port(3),
-        Output::Port(4),
+        Output::Port1,
+        Output::Port2,
+        Output::Port3,
+        Output::Port4,
         Output::Relay,
     ];
 
     fn code(self) -> u8 {
         match self {
-            Output::Port(n) => n,
+            Output::Port1 => 0x01,
+            Output::Port2 => 0x02,
+            Output::Port3 => 0x03,
+            Output::Port4 => 0x04,
             Output::Relay => 0x11,
         }
     }
@@ -49,7 +58,10 @@ impl Output {
 impl fmt::Display for Output {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Output::Port(n) => write!(f, "Port {n}"),
+            Output::Port1 => write!(f, "Port 1"),
+            Output::Port2 => write!(f, "Port 2"),
+            Output::Port3 => write!(f, "Port 3"),
+            Output::Port4 => write!(f, "Port 4"),
             Output::Relay => write!(f, "Relay"),
         }
     }
@@ -75,11 +87,15 @@ impl Target {
     }
 
     /// The outputs a target covers.
-    pub fn outputs(self) -> Vec<Output> {
+    pub fn outputs(self) -> &'static [Output] {
         match self {
-            Target::One(output) => vec![output],
-            Target::Ports => Output::ALL[..4].to_vec(),
-            Target::All => Output::ALL.to_vec(),
+            Target::One(Output::Port1) => &Output::ALL[0..1],
+            Target::One(Output::Port2) => &Output::ALL[1..2],
+            Target::One(Output::Port3) => &Output::ALL[2..3],
+            Target::One(Output::Port4) => &Output::ALL[3..4],
+            Target::One(Output::Relay) => &Output::ALL[4..5],
+            Target::Ports => &Output::ALL[..4],
+            Target::All => &Output::ALL,
         }
     }
 }
@@ -129,13 +145,14 @@ impl<T: Transport> Ykur<T> {
     /// Switches a target on or off and confirms the new state by reading it
     /// back.
     pub fn switch(&self, target: Target, on: bool) -> Result<()> {
+        let code = target.code();
         let action = if on { SWITCH_ON } else { SWITCH_OFF };
-        let answer = self.exchange(&[action, target.code()])?;
+        let answer = self.exchange(&[action, code])?;
 
         // The datasheet echoes the action; firmware 1.2.1 answers a switch off
         // with the state command code instead (measured, see the README).
         let echoed = answer[0] == action || (!on && answer[0] == GET_STATE);
-        if !echoed || answer[1] != target.code() {
+        if !echoed || answer[1] != code {
             return Err(self.unexpected("switching", &answer));
         }
         if answer[2] == STATUS_ERROR {
@@ -147,7 +164,7 @@ impl<T: Transport> Ykur<T> {
 
         // The status byte of the answer is not what the datasheet says on
         // firmware 1.2.1, so the outcome is read back instead.
-        for output in target.outputs() {
+        for &output in target.outputs() {
             if self.state(output)? != on {
                 return Err(Error::Rejected(format!(
                     "{output} did not switch {}",
@@ -160,8 +177,9 @@ impl<T: Transport> Ykur<T> {
 
     /// Whether an output is on.
     pub fn state(&self, output: Output) -> Result<bool> {
-        let answer = self.exchange(&[GET_STATE, output.code()])?;
-        if answer[0] != GET_STATE || answer[1] != output.code() {
+        let code = output.code();
+        let answer = self.exchange(&[GET_STATE, code])?;
+        if answer[0] != GET_STATE || answer[1] != code {
             return Err(self.unexpected("the state", &answer));
         }
         match answer[2] {
@@ -261,18 +279,18 @@ mod tests {
         assert_eq!(b.transport().desyncs(), 1);
 
         let b = board(FakeBoard::new().then(&[0x03, 0x02, 0x01]));
-        device_error(b.state(Output::Port(1)));
+        device_error(b.state(Output::Port1));
         assert_eq!(b.transport().desyncs(), 1);
 
         let b = board(FakeBoard::new().then(&[0x01, 0x02, 0x00]));
-        device_error(b.switch(Target::One(Output::Port(1)), true));
+        device_error(b.switch(Target::One(Output::Port1), true));
         assert_eq!(b.transport().desyncs(), 1);
     }
 
     #[test]
     fn a_fitting_answer_leaves_the_transport_alone() {
         let b = board(FakeBoard::new().then(&[0x03, 0x01, 0x01]));
-        b.state(Output::Port(1)).unwrap();
+        b.state(Output::Port1).unwrap();
         assert_eq!(b.transport().desyncs(), 0);
     }
 
@@ -292,13 +310,14 @@ mod tests {
 
     #[test]
     fn the_state_command_names_the_output() {
-        for (output, code) in [
-            (Output::Port(1), 0x01),
-            (Output::Port(2), 0x02),
-            (Output::Port(3), 0x03),
-            (Output::Port(4), 0x04),
-            (Output::Relay, 0x11),
+        for (output, code, name) in [
+            (Output::Port1, 0x01, "Port 1"),
+            (Output::Port2, 0x02, "Port 2"),
+            (Output::Port3, 0x03, "Port 3"),
+            (Output::Port4, 0x04, "Port 4"),
+            (Output::Relay, 0x11, "Relay"),
         ] {
+            assert_eq!(output.to_string(), name);
             let b = board(FakeBoard::new().then(&[0x03, code, 0x01]));
             assert!(b.state(output).unwrap(), "{output}");
             assert_eq!(b.transport().sent(2), [vec![0x03, code]]);
@@ -314,19 +333,19 @@ mod tests {
     #[test]
     fn a_state_the_board_reports_as_error_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x03, 0x02, 0xAA]));
-        rejected(b.state(Output::Port(2)));
+        rejected(b.state(Output::Port2));
     }
 
     #[test]
     fn a_state_for_another_output_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x03, 0x02, 0x01]));
-        device_error(b.state(Output::Port(1)));
+        device_error(b.state(Output::Port1));
     }
 
     #[test]
     fn an_undocumented_state_value_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x03, 0x01, 0x02]));
-        device_error(b.state(Output::Port(1)));
+        device_error(b.state(Output::Port1));
     }
 
     // Switching (datasheet 4.1.1, and the answers of firmware 1.2.1)
@@ -338,7 +357,7 @@ mod tests {
                 .then(&[0x01, 0x03, 0x00])
                 .then(&[0x03, 0x03, 0x01]),
         );
-        b.switch(Target::One(Output::Port(3)), true).unwrap();
+        b.switch(Target::One(Output::Port3), true).unwrap();
         assert_eq!(b.transport().sent(2), [vec![0x01, 0x03], vec![0x03, 0x03]]);
     }
 
@@ -361,32 +380,32 @@ mod tests {
                 .then(&[0x01, 0x01, 0xFF])
                 .then(&[0x03, 0x01, 0x01]),
         );
-        on.switch(Target::One(Output::Port(1)), true).unwrap();
+        on.switch(Target::One(Output::Port1), true).unwrap();
         let off = board(
             FakeBoard::new()
                 .then(&[0x02, 0x01, 0xFF])
                 .then(&[0x03, 0x01, 0x00]),
         );
-        off.switch(Target::One(Output::Port(1)), false).unwrap();
+        off.switch(Target::One(Output::Port1), false).unwrap();
     }
 
     #[test]
     fn a_switch_the_board_reports_as_error_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x01, 0x04, 0xAA]));
-        rejected(b.switch(Target::One(Output::Port(4)), true));
+        rejected(b.switch(Target::One(Output::Port4), true));
         assert!(b.transport().exhausted());
     }
 
     #[test]
     fn a_switch_answer_for_another_target_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x01, 0x02, 0x00]));
-        device_error(b.switch(Target::One(Output::Port(1)), true));
+        device_error(b.switch(Target::One(Output::Port1), true));
     }
 
     #[test]
     fn a_switch_answer_to_another_command_is_an_error() {
         let b = board(FakeBoard::new().then(&[0x20, 0x01, 0x00]));
-        device_error(b.switch(Target::One(Output::Port(1)), true));
+        device_error(b.switch(Target::One(Output::Port1), true));
     }
 
     #[test]
@@ -403,6 +422,13 @@ mod tests {
                 .then(&[0x03, 0x11, 0x00]),
         );
         assert!(rejected(b.switch(Target::One(Output::Relay), true)).contains("Relay"));
+    }
+
+    #[test]
+    fn one_target_covers_exactly_its_output() {
+        for output in Output::ALL {
+            assert_eq!(Target::One(output).outputs(), [output], "{output}");
+        }
     }
 
     #[test]
@@ -445,7 +471,7 @@ mod tests {
     fn an_output_left_behind_by_switching_everything_is_named() {
         let mut fake = FakeBoard::new().then(&[0x01, 0xAA, 0x00]);
         for output in Output::ALL {
-            let on = output != Output::Port(3);
+            let on = output != Output::Port3;
             fake = fake.then(&[0x03, output.code(), u8::from(on)]);
         }
         assert!(rejected(board(fake).switch(Target::All, true)).contains("Port 3"));

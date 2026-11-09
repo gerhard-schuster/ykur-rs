@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command line grammar, compatible with Yepkit's ykurcmd:
 //! `[-s SERIAL] -u|-d PORT`, `[-s SERIAL] -g PORT`, `[-s SERIAL] -v`, each
-//! optionally led by `--no-wait`, plus `-l`, `--version` and `-h`. PORT is 1 to 4, `r` for the relay or `a` for
-//! the four ports.
+//! optionally with `--no-wait`, before or after `-s`, plus `-l`, `--version` and `-h`. PORT is 1 to 4,
+//! `r` for the relay, `a` for the four ports, or `everything` for the four ports and the relay.
 
 use ykur::{Error, Output, Result, Target};
 
@@ -27,31 +27,34 @@ pub struct Invocation {
 pub fn parse(args: &[String]) -> Result<Invocation> {
     let mut rest = args.iter().map(String::as_str);
     let mut serial = None;
-    let mut first = rest.next();
+    let mut no_wait = false;
 
-    let no_wait = first == Some("--no-wait");
-    if no_wait {
-        first = rest.next();
-    }
-
-    if first == Some("-s") {
-        let value = rest
-            .next()
-            .ok_or_else(|| usage("-s needs a serial number"))?;
-        serial = Some(value.to_owned());
-        first = rest.next();
-    }
-
-    let command = match first {
-        None => return Err(usage("No command given")),
-        Some("-u") => Command::Switch(target(rest.next(), "-u")?, true),
-        Some("-d") => Command::Switch(target(rest.next(), "-d")?, false),
-        Some("-g") => Command::State(target(rest.next(), "-g")?),
-        Some("-v") => Command::FirmwareVersion,
-        Some("-l") => Command::List,
-        Some("--version") => Command::Version,
-        Some("-h" | "--help") => Command::Help,
-        Some(other) => return Err(usage(&format!("Unknown option {other}"))),
+    let command = loop {
+        break match rest.next() {
+            Some("--no-wait") if !no_wait => {
+                no_wait = true;
+                continue;
+            }
+            Some("-s") if serial.is_none() => {
+                let value = rest
+                    .next()
+                    .ok_or_else(|| usage("-s needs a serial number"))?;
+                serial = Some(value.to_owned());
+                continue;
+            }
+            Some(option @ ("--no-wait" | "-s")) => {
+                return Err(usage(&format!("{option} given more than once")))
+            }
+            None => return Err(usage("No command given")),
+            Some("-u") => Command::Switch(target(rest.next(), "-u")?, true),
+            Some("-d") => Command::Switch(target(rest.next(), "-d")?, false),
+            Some("-g") => Command::State(target(rest.next(), "-g")?),
+            Some("-v") => Command::FirmwareVersion,
+            Some("-l") => Command::List,
+            Some("--version") => Command::Version,
+            Some("-h" | "--help") => Command::Help,
+            Some(other) => return Err(usage(&format!("Unknown option {other}"))),
+        };
     };
 
     if let Some(extra) = rest.next() {
@@ -76,18 +79,24 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
 
 fn target(arg: Option<&str>, option: &str) -> Result<Target> {
     match arg {
-        Some("1") => Ok(Target::One(Output::Port(1))),
-        Some("2") => Ok(Target::One(Output::Port(2))),
-        Some("3") => Ok(Target::One(Output::Port(3))),
-        Some("4") => Ok(Target::One(Output::Port(4))),
+        Some("1") => Ok(Target::One(Output::Port1)),
+        Some("2") => Ok(Target::One(Output::Port2)),
+        Some("3") => Ok(Target::One(Output::Port3)),
+        Some("4") => Ok(Target::One(Output::Port4)),
         Some("r") => Ok(Target::One(Output::Relay)),
         // As in Yepkit's ykurcmd (undocumented there): the four ports, not
         // the relay.
         Some("a") => Ok(Target::Ports),
+        // Not `all`: ykurcmd looks at the first character only, so there
+        // `-d all` leaves the relay alone. A script moved over must not start
+        // switching the load on the relay without a word.
+        Some("everything") => Ok(Target::All),
         Some(other) => Err(usage(&format!(
-            "Invalid port {other}: expected 1, 2, 3, 4, r or a"
+            "Invalid port {other}: expected 1, 2, 3, 4, r, a or everything"
         ))),
-        None => Err(usage(&format!("{option} needs a port: 1, 2, 3, 4, r or a"))),
+        None => Err(usage(&format!(
+            "{option} needs a port: 1, 2, 3, 4, r, a or everything"
+        ))),
     }
 }
 
@@ -120,30 +129,33 @@ mod tests {
     }
 
     #[test]
-    fn switching_takes_every_port_the_relay_and_all() {
+    fn switching_takes_every_port_the_relay_and_everything() {
         assert_eq!(
             command("-u 1"),
-            Command::Switch(Target::One(Output::Port(1)), true)
+            Command::Switch(Target::One(Output::Port1), true)
         );
         assert_eq!(
             command("-d 4"),
-            Command::Switch(Target::One(Output::Port(4)), false)
+            Command::Switch(Target::One(Output::Port4), false)
         );
         assert_eq!(
             command("-u r"),
             Command::Switch(Target::One(Output::Relay), true)
         );
         assert_eq!(command("-d a"), Command::Switch(Target::Ports, false));
+        assert_eq!(command("-u everything"), Command::Switch(Target::All, true));
+        assert_eq!(
+            command("-d everything"),
+            Command::Switch(Target::All, false)
+        );
     }
 
     #[test]
     fn the_state_takes_the_same_ports() {
-        assert_eq!(
-            command("-g 2"),
-            Command::State(Target::One(Output::Port(2)))
-        );
+        assert_eq!(command("-g 2"), Command::State(Target::One(Output::Port2)));
         assert_eq!(command("-g r"), Command::State(Target::One(Output::Relay)));
         assert_eq!(command("-g a"), Command::State(Target::Ports));
+        assert_eq!(command("-g everything"), Command::State(Target::All));
     }
 
     #[test]
@@ -161,9 +173,11 @@ mod tests {
         let inv = parse_str("--no-wait -g r").unwrap();
         assert!(inv.no_wait);
         assert_eq!(inv.command, Command::State(Target::One(Output::Relay)));
-        let inv = parse_str("--no-wait -s YK1 -u 1").unwrap();
-        assert!(inv.no_wait);
-        assert_eq!(inv.serial.as_deref(), Some("YK1"));
+        for line in ["--no-wait -s YK1 -u 1", "-s YK1 --no-wait -u 1"] {
+            let inv = parse_str(line).unwrap();
+            assert!(inv.no_wait, "{line}");
+            assert_eq!(inv.serial.as_deref(), Some("YK1"), "{line}");
+        }
         assert!(!parse_str("-g r").unwrap().no_wait);
     }
 
@@ -193,9 +207,25 @@ mod tests {
     }
 
     #[test]
+    fn all_is_refused_since_ykurcmd_takes_it_for_the_four_ports() {
+        for line in ["-u all", "-d all", "-g all"] {
+            assert!(usage_error(line).starts_with("Invalid port all"), "{line}");
+        }
+    }
+
+    #[test]
     fn a_missing_port_is_a_usage_error() {
         usage_error("-u");
         usage_error("-s YK1 -g");
+    }
+
+    #[test]
+    fn an_option_given_twice_is_named_as_such() {
+        assert_eq!(
+            usage_error("--no-wait --no-wait -g r"),
+            "--no-wait given more than once"
+        );
+        assert_eq!(usage_error("-s A -s B -g r"), "-s given more than once");
     }
 
     #[test]

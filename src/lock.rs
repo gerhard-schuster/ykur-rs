@@ -172,7 +172,7 @@ mod linux {
     use rustix::io::Errno;
 
     use super::{wait_for, Attempt};
-    use crate::error::{Error, Result};
+    use crate::error::{Error, Result, ENODEV};
 
     /// What the user is told when another instance holds the board.
     pub(crate) const HELD: &str = "another ykurctrl is using it";
@@ -187,16 +187,25 @@ mod linux {
     }
 
     impl NodeLock {
+        /// What a failed open of the node means. A board unplugged at that
+        /// moment ends like one unplugged later, whether the node is still
+        /// there (`ENODEV`) or already gone (`ENOENT`), as in the transport.
+        pub(crate) fn open_failed(node: &Path, error: &std::io::Error) -> Error {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                Error::PermissionDenied
+            } else if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(ENODEV)
+            {
+                Error::no_longer_connected()
+            } else {
+                Error::Hid(format!("Cannot open {}: {error}", node.display()))
+            }
+        }
+
         /// Takes the lock on `node`, waiting up to `wait` for another holder
         /// to let go. `serial` names the board in the message.
         pub(crate) fn take(node: &Path, serial: &str, wait: Duration) -> Result<NodeLock> {
-            let file = File::open(node).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    Error::PermissionDenied
-                } else {
-                    Error::Hid(format!("Cannot open {}: {error}", node.display()))
-                }
-            })?;
+            let file = File::open(node).map_err(|error| Self::open_failed(node, &error))?;
 
             wait_for(serial, wait, || {
                 match flock(&file, FlockOperation::NonBlockingLockExclusive) {
@@ -335,7 +344,7 @@ mod tests {
                     let from = Instant::now();
                     // Long enough that an overlap could not hide.
                     thread::sleep(Duration::from_millis(100));
-                    let on = board.state(Output::Port(1)).unwrap();
+                    let on = board.state(Output::Port1).unwrap();
                     let to = Instant::now();
                     drop(board);
                     spans.lock().unwrap().push((from, to));
@@ -365,7 +374,7 @@ mod tests {
                 board: FakeBoard::new().then_fail(Error::NoResponse),
                 _turn: take(DEFAULT_WAIT)?,
             });
-            board.state(Output::Port(1))?;
+            board.state(Output::Port1)?;
             Ok(())
         };
 
@@ -729,6 +738,16 @@ mod tests {
         }
 
         #[test]
+        fn a_node_whose_device_is_gone_is_unavailable() {
+            let error = NodeLock::open_failed(
+                std::path::Path::new("/dev/hidraw0"),
+                &std::io::Error::from_raw_os_error(crate::error::ENODEV),
+            );
+            assert!(matches!(&error, Error::Unavailable(_)), "{error:?}");
+            assert_eq!(error.exit_code(), 69);
+        }
+
+        #[test]
         fn a_missing_node_is_an_error_not_a_wait() {
             let started = Instant::now();
             let result = NodeLock::take(
@@ -737,7 +756,7 @@ mod tests {
                 DEFAULT_WAIT,
             );
 
-            assert!(matches!(&result, Err(Error::Hid(msg)) if msg.contains("Cannot open")));
+            assert!(matches!(&result, Err(Error::Unavailable(_))));
             // Generous: the point is that it did not wait the five seconds.
             assert!(started.elapsed() < DEFAULT_WAIT / 2);
         }

@@ -1,0 +1,142 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.Dd November 9, 2026
+.Dt YKURCTRL 1
+.Os
+.Sh NAME
+.Nm ykurctrl
+.Nd switch the relay and ports of a Yepkit YKUR board over USB HID
+.Sh SYNOPSIS
+.Nm
+.Op Fl -no-wait
+.Op Fl s Ar SERIAL
+.Fl u Ar PORT
+.Nm
+.Op Fl -no-wait
+.Op Fl s Ar SERIAL
+.Fl d Ar PORT
+.Nm
+.Op Fl -no-wait
+.Op Fl s Ar SERIAL
+.Fl g Ar PORT
+.Nm
+.Op Fl -no-wait
+.Op Fl s Ar SERIAL
+.Fl v
+.Nm
+.Fl l
+.Nm
+.Fl -version
+.Nm
+.Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+switches the on-board relay and the four relay driver ports of a Yepkit YKUR
+USB relay board (VID 0x04D8, PID 0xF1CB) and reads back their state.
+Every switching command is confirmed by reading the state back; a target that
+did not switch is reported as an error.
+.Pp
+Two invocations addressing the same board take turns: on Linux through an
+advisory
+.Xr flock 2
+on the board's
+.Pa /dev/hidrawN
+node, on FreeBSD through the single-open
+.Xr hidraw 4
+node itself, and on macOS through an exclusive IOKit open.
+A second invocation waits up to five seconds for the board, or fails at once
+with
+.Fl -no-wait .
+.Pp
+.Fl -no-wait
+and
+.Fl s
+go before the command, in either order, each at most once.
+.Pp
+The options are as follows:
+.Bl -tag -width "-s SERIAL"
+.It Fl u Ar PORT
+Switch
+.Ar PORT
+on and confirm the state by reading it back.
+.It Fl d Ar PORT
+Switch
+.Ar PORT
+off and confirm the state by reading it back.
+.It Fl g Ar PORT
+Print whether
+.Ar PORT
+is on or off, one line per output, as in
+.Ql Port 1: on
+or
+.Ql Relay: off .
+.It Fl v
+Print the firmware version of the board.
+.It Fl l
+List the serial numbers of the attached YKUR boards.
+.It Fl s Ar SERIAL
+Address the board with serial number
+.Ar SERIAL
+instead of the first one the system enumerates.
+.It Fl -no-wait
+Fail at once with exit status 75 when the board is in use, instead of waiting
+up to five seconds for it.
+.It Fl -version
+Print the version of
+.Nm .
+.It Fl h , Fl -help
+Print the usage summary.
+.El
+.Pp
+.Ar PORT
+is one of:
+.Bl -tag -width "everything" -compact
+.It Cm 1 .. Cm 4
+One of the four relay driver ports.
+.It Cm r
+The on-board relay.
+.It Cm a
+All four relay driver ports at once; the relay is left alone.
+.It Cm everything
+All four relay driver ports and the on-board relay at once.
+.El
+.Sh EXIT STATUS
+The exit status follows
+.Xr sysexits 3 :
+.Bl -tag -width "101" -compact
+.It Cm 0
+Success; also
+.Fl l
+when no board is attached, and when the reader of standard output closed the
+pipe early.
+.It Cm 64
+Invalid command line.
+.It Cm 69
+No board found, unknown serial number, board disconnected, or the board
+reported an error.
+.It Cm 74
+No answer within the five second timeout, a truncated report, a transport
+error, or writing to standard output failed for another reason than a closed
+pipe.
+.It Cm 75
+The board is in use by another process (after waiting five seconds, or at once
+with
+.Fl -no-wait ) .
+.It Cm 76
+An answer from the board did not fit the request.
+.It Cm 77
+Permission denied opening the device node.
+.It Cm 101
+Internal panic.
+.El
+.Sh EXAMPLES
+Switch relay driver port 1 on, read all outputs including the relay, and switch
+everything off on board
+.Ql YK22170 :
+.Bd -literal -offset indent
+ykurctrl -u 1
+ykurctrl -g everything
+ykurctrl -s YK22170 -d everything
+.Ed
+.Sh SEE ALSO
+.Xr flock 2 ,
+.Xr sysexits 3
