@@ -10,15 +10,29 @@ use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-use async_hid::Access;
 use async_hid::{AsyncHidRead, AsyncHidWrite, Device, DeviceReaderWriter, HidBackend};
 use futures_lite::{future, StreamExt};
 
 use crate::error::{Error, Result};
-use crate::lock::Attempt;
 pub use crate::lock::DEFAULT_WAIT;
 use crate::sanitize::sanitize;
+
+#[cfg(target_os = "freebsd")]
+mod freebsd;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+mod nodes;
+mod waiting;
+
+#[cfg(target_os = "freebsd")]
+use freebsd as platform;
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+pub(crate) use platform::PERMISSION_DENIED;
 
 /// USB vendor id of the YKUR (YKUR datasheet rev. 1.2.1, 4).
 pub const VENDOR_ID: u16 = 0x04D8;
@@ -79,11 +93,11 @@ pub struct Board {
     /// left behind, nor after a failed or unfitting exchange.
     in_step: Cell<bool>,
 
-    /// This process's turn at the board, see [`crate::lock`]. Declared last
-    /// so that it is dropped last: the next invocation must not get the turn
-    /// while this one still has the device open.
-    #[cfg(target_os = "linux")]
-    _turn: crate::lock::NodeLock,
+    /// This process's turn at the board, see [`crate::lock`]; on macOS and
+    /// FreeBSD the handle itself is the turn. Declared last so that it is
+    /// dropped last: the next invocation must not get the turn while this one
+    /// still has the device open.
+    _turn: platform::Turn,
 }
 
 impl Board {
@@ -99,79 +113,10 @@ impl Board {
     /// invocation is using. With `wait` zero, a board in use fails at once
     /// with [`Error::Busy`].
     pub fn open_within(serial: Option<&str>, wait: Duration) -> Result<Self> {
-        // Linux: the turn first, then the handle, so this process never has
-        // the board open while another one is in the middle of an exchange.
-        #[cfg(target_os = "linux")]
-        let (turn, device) = {
-            let (_, device, turn) = crate::lock::take_stable(
-                wait,
-                || future::block_on(choose(serial)),
-                hidraw_node_of,
-                |node, found, left| crate::lock::NodeLock::take(node, found, left),
-            )?;
-            (turn, device)
-        };
-        #[cfg(target_os = "linux")]
-        let dev = future::block_on(device.open())?;
-
-        // macOS: the handle itself is the turn. The board is opened
-        // exclusively (seized), so every other open fails with Busy until
-        // this handle is dropped, and such an open is repeated.
-        #[cfg(target_os = "macos")]
-        let dev = {
-            let (found, device) = future::block_on(choose(serial))?;
-            let mut seize = Seize::new(device, crate::lock::HELD_EXCLUSIVELY);
-            crate::lock::wait_for(&found, wait, || {
-                seize.attempt(
-                    || future::block_on(choose(Some(&found))).map(|(_, again)| again),
-                    |device| {
-                        future::block_on(device.open_options().access(Access::Exclusive).open())
-                    },
-                )
-            })?
-        };
-        // FreeBSD: hidraw takes one open at a time, so the handle is the turn
-        // as on macOS. Listing opens the node too, so a held board is missing
-        // from the list rather than refused.
-        #[cfg(target_os = "freebsd")]
-        let dev = {
-            use crate::lock::HELD_OPEN;
-
-            // Without a serial number, the first board by node, held or not.
-            let first = serial
-                .is_none()
-                .then(|| held_board(None))
-                .flatten()
-                .map(|(found, _)| found);
-            let serial = serial.or(first.as_deref());
-
-            let mut node_wait = NodeWait::default();
-            crate::lock::wait_for(serial.unwrap_or_default(), wait, || {
-                node_wait.attempt(
-                    || future::block_on(choose(serial)).map(|(_, device)| device),
-                    || held_board(serial),
-                    |node, found| future::block_on(node_device(node, found)),
-                    |device: Device| future::block_on(device.open()),
-                    HELD_OPEN,
-                )
-            })
-            .map_err(|error| match error {
-                Error::Busy { waited, cause, .. } => Error::Busy {
-                    serial: held_board(serial)
-                        .map(|(found, _)| found)
-                        .or_else(|| serial.map(str::to_owned))
-                        .unwrap_or_default(),
-                    waited,
-                    cause,
-                },
-                error => error,
-            })?
-        };
-
+        let (dev, turn) = platform::open(serial, wait)?;
         Ok(Board {
             dev: RefCell::new(dev),
             in_step: Cell::new(false),
-            #[cfg(target_os = "linux")]
             _turn: turn,
         })
     }
@@ -281,7 +226,7 @@ pub fn list() -> Result<Vec<String>> {
         .map(|(serial, _)| serial);
     // A board another program has open is missing from the device list.
     #[cfg(target_os = "freebsd")]
-    let attached = hidraw_boards()
+    let attached = platform::hidraw_boards()
         .into_iter()
         .map(|(serial, _)| serial)
         .chain(attached);
@@ -295,215 +240,6 @@ pub fn list() -> Result<Vec<String>> {
     Ok(serials)
 }
 
-/// What to tell a user whose operating system refused to open the board.
-#[cfg(target_os = "linux")]
-pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the hidraw device of the YKUR. \
-Allow access with a udev rule, /etc/udev/rules.d/60-ykur.rules as shown in the \
-README, make this user a member of the group the rule names, and replug the board";
-#[cfg(target_os = "freebsd")]
-pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the hidraw device of the YKUR. \
-Allow access with a devfs.rules entry as shown in the README and make this user a member of \
-the group it names";
-#[cfg(target_os = "macos")]
-pub(crate) const PERMISSION_DENIED: &str = "Permission denied on the YKUR";
-
-/// Waiting for a board opened exclusively, on macOS, kept between attempts.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-struct Seize<D> {
-    /// None while the board re-enumerates, e.g. reset by the holder.
-    device: Option<D>,
-    /// Once it was held elsewhere, the holder may have reset it.
-    may_reset: bool,
-    busy: &'static str,
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-impl<D> Seize<D> {
-    fn new(device: D, busy: &'static str) -> Self {
-        Seize {
-            device: Some(device),
-            may_reset: false,
-            busy,
-        }
-    }
-
-    fn attempt<T>(
-        &mut self,
-        choose: impl FnOnce() -> Result<D>,
-        open: impl FnOnce(&D) -> async_hid::HidResult<T>,
-    ) -> Attempt<T> {
-        let current = match self.device.take() {
-            Some(current) => current,
-            None => match choose() {
-                Ok(again) => again,
-                Err(error @ Error::NotFound { .. }) => return Attempt::Gone(error),
-                Err(error) => return Attempt::Failed(error),
-            },
-        };
-        match open(&current) {
-            Ok(dev) => Attempt::Got(dev),
-            Err(error) if refused_as_busy(&error) => {
-                self.device = Some(current);
-                self.may_reset = true;
-                Attempt::Busy(self.busy.to_owned())
-            }
-            // IOKit names a vanished or returning board in several ways.
-            Err(error) if self.may_reset || matches!(error, async_hid::HidError::NotConnected) => {
-                Attempt::Gone(error.into())
-            }
-            Err(error) => Attempt::Failed(error.into()),
-        }
-    }
-}
-
-/// Waiting for a board on FreeBSD, where hidraw takes one open at a time,
-/// kept between attempts.
-#[derive(Default)]
-#[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
-struct NodeWait {
-    /// Once the board is missing from the list, only its node is tried.
-    held: Option<(String, std::path::PathBuf)>,
-    /// Once it was gone, e.g. reset by the holder, it may be coming back.
-    gone: bool,
-}
-
-#[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
-impl NodeWait {
-    fn attempt<D, T>(
-        &mut self,
-        choose: impl FnOnce() -> Result<D>,
-        held_board: impl FnOnce() -> Option<(String, std::path::PathBuf)>,
-        node_device: impl FnOnce(&std::path::Path, &str) -> async_hid::HidResult<D>,
-        open: impl FnOnce(D) -> async_hid::HidResult<T>,
-        busy: &str,
-    ) -> Attempt<T> {
-        let device = match self.held.take() {
-            Some(board) => self.query(board, node_device),
-            None => match choose() {
-                Ok(device) => Ok(device),
-                Err(error @ Error::NotFound { .. }) => match held_board() {
-                    Some(board) => self.query(board, node_device),
-                    None if self.gone => return Attempt::Gone(error),
-                    None => return Attempt::Failed(error),
-                },
-                Err(error) => return Attempt::Failed(error),
-            },
-        };
-        match device.and_then(open) {
-            Ok(dev) => Attempt::Got(dev),
-            Err(error) if refused_as_busy(&error) => Attempt::Busy(busy.to_owned()),
-            Err(error @ async_hid::HidError::NotConnected) => {
-                self.gone = true;
-                self.held = None;
-                Attempt::Gone(error.into())
-            }
-            Err(error) => Attempt::Failed(error.into()),
-        }
-    }
-
-    fn query<D>(
-        &mut self,
-        (found, node): (String, std::path::PathBuf),
-        node_device: impl FnOnce(&std::path::Path, &str) -> async_hid::HidResult<D>,
-    ) -> async_hid::HidResult<D> {
-        let device = node_device(&node, &found);
-        self.held = Some((found, node));
-        device
-    }
-}
-
-/// Whether an open failed because another handle holds the board
-/// exclusively, which waiting may cure. The transport reports exactly that
-/// as `Busy` (`kIOReturnExclusiveAccess` on macOS); every other failure is
-/// reported at once.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-fn refused_as_busy(error: &async_hid::HidError) -> bool {
-    matches!(error, async_hid::HidError::Busy)
-}
-
-/// The serial number of a YKUR in the `%pnpinfo` of a FreeBSD USB device, or
-/// `None` for any other device.
-#[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
-fn ykur_serial(pnpinfo: &str) -> Option<String> {
-    let field = |key: &str| {
-        pnpinfo
-            .split_whitespace()
-            .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
-    };
-    let hex = |key: &str| u16::from_str_radix(field(key)?.strip_prefix("0x")?, 16).ok();
-
-    (hex("vendor")? == VENDOR_ID && hex("product")? == PRODUCT_ID).then(|| {
-        match field("sernum").unwrap_or("").trim_matches('"') {
-            // Named as the device list names a board without one.
-            "" => "<unknown>".to_owned(),
-            sernum => sanitize(sernum),
-        }
-    })
-}
-
-/// The serial numbers and nodes of all YKUR boards with a hidraw node, read
-/// through sysctl: listing opens the node, and FreeBSD lets one handle open
-/// it at a time, so a board another program has open is missing from the
-/// list.
-#[cfg(target_os = "freebsd")]
-fn hidraw_boards() -> Vec<(String, std::path::PathBuf)> {
-    let sysctl = |name: String| {
-        let out = std::process::Command::new("/sbin/sysctl")
-            .args(["-n", &name])
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    };
-    // "hidbus3" names the sysctl node "dev.hidbus.3".
-    let node = |dev: &str| {
-        let unit = dev.trim_start_matches(|c: char| !c.is_ascii_digit());
-        format!("dev.{}.{unit}", &dev[..dev.len() - unit.len()])
-    };
-
-    let Ok(dev) = std::fs::read_dir("/dev") else {
-        return Vec::new();
-    };
-    let mut boards: Vec<_> = dev
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter(|name| is_hidraw_name(name))
-        .filter_map(|hidraw| {
-            // hidraw sits on hidbus, which sits on the USB driver.
-            let hidbus = sysctl(format!("{}.%parent", node(&hidraw)))?;
-            let usb = sysctl(format!("{}.%parent", node(&hidbus)))?;
-            let serial = ykur_serial(&sysctl(format!("{}.%pnpinfo", node(&usb)))?)?;
-            Some((serial, std::path::Path::new("/dev").join(hidraw)))
-        })
-        .collect();
-    // In the node order of the device list.
-    boards.sort_by(|a, b| a.1.cmp(&b.1));
-    boards
-}
-
-/// The board `serial` on `node`, read without listing the other nodes.
-#[cfg(target_os = "freebsd")]
-async fn node_device(node: &std::path::Path, serial: &str) -> async_hid::HidResult<Device> {
-    let id = async_hid::DeviceId::DevPath(node.to_path_buf());
-    backend()
-        .query_devices(&id)
-        .await?
-        .find(|dev| {
-            dev.vendor_id == VENDOR_ID
-                && dev.product_id == PRODUCT_ID
-                && sanitize(dev.serial_number.as_deref().unwrap_or("<unknown>")) == serial
-        })
-        .ok_or(async_hid::HidError::NotConnected)
-}
-
-/// The board with `serial`, or any board, among those with a hidraw node.
-#[cfg(target_os = "freebsd")]
-fn held_board(serial: Option<&str>) -> Option<(String, std::path::PathBuf)> {
-    hidraw_boards()
-        .into_iter()
-        .find(|(found, _)| serial.is_none_or(|wanted| found == wanted))
-}
-
 /// The board with the given serial number, or the first one found, with its
 /// sanitised serial number.
 async fn choose(serial: Option<&str>) -> Result<(String, Device)> {
@@ -515,45 +251,6 @@ async fn choose(serial: Option<&str>) -> Result<(String, Device)> {
     chosen.ok_or_else(|| Error::NotFound {
         serial: serial.map(str::to_owned),
     })
-}
-
-/// The hidraw node of a board found by the transport.
-///
-/// On Linux the transport identifies a device by its directory in sysfs,
-/// `.../hidraw/hidrawN`, and opens the node named in the `uevent` file there.
-/// The lock goes on the same node.
-#[cfg(target_os = "linux")]
-fn hidraw_node_of(device: &Device) -> Result<std::path::PathBuf> {
-    let async_hid::DeviceId::DevPath(sysfs) = &device.id else {
-        return Err(Error::Unavailable("The YKUR has no hidraw device".into()));
-    };
-
-    hidraw_node(sysfs).ok_or_else(|| {
-        Error::Unavailable(format!(
-            "No hidraw device node found for the YKUR at {}",
-            sysfs.display()
-        ))
-    })
-}
-
-/// Reads `DEVNAME` from the `uevent` file in a hidraw directory of sysfs and
-/// turns it into the path under `/dev`. Only a plain `hidrawN` is taken, so a
-/// file that says something else cannot point the lock anywhere.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn hidraw_node(sysfs: &std::path::Path) -> Option<std::path::PathBuf> {
-    let uevent = std::fs::read_to_string(sysfs.join("uevent")).ok()?;
-    let name = uevent
-        .lines()
-        .find_map(|line| line.strip_prefix("DEVNAME="))?
-        .trim();
-
-    is_hidraw_name(name).then(|| std::path::Path::new("/dev").join(name))
-}
-
-/// Whether `name` is `hidraw` followed by one or more ASCII digits.
-fn is_hidraw_name(name: &str) -> bool {
-    name.strip_prefix("hidraw")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// One backend for the process, made once instead of per call.
@@ -600,17 +297,6 @@ fn full_report(read: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_board_is_recognised_in_the_pnp_info_of_freebsd() {
-        let ykur = r#"vendor=0x04d8 product=0xf1cb devclass=0x00 sernum="YK22170" release=0x0100"#;
-        assert_eq!(ykur_serial(ykur), Some("YK22170".to_owned()));
-        let mouse = r#"vendor=0x0e0f product=0x0003 sernum="" release=0x0102"#;
-        assert_eq!(ykur_serial(mouse), None);
-        let unnamed = r#"vendor=0x04d8 product=0xf1cb sernum="""#;
-        assert_eq!(ykur_serial(unnamed), Some("<unknown>".to_owned()));
-        assert_eq!(ykur_serial("pci0:0:0:0"), None);
-    }
 
     #[test]
     fn a_truncated_report_is_an_io_error_not_an_unfitting_answer() {
@@ -884,76 +570,6 @@ mod tests {
         assert!(matches!(&error, Error::Hid(msg) if msg != PERMISSION_DENIED));
     }
 
-    /// A directory in the temporary directory standing in for sysfs,
-    /// removed again when dropped.
-    struct FakeSysfs(std::path::PathBuf);
-
-    impl FakeSysfs {
-        fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("ykur-sysfs-{}-{name}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            FakeSysfs(dir)
-        }
-
-        fn file(&self, path: &str, content: &str) -> &Self {
-            let path = self.0.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, content).unwrap();
-            self
-        }
-    }
-
-    impl Drop for FakeSysfs {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn only_busy_from_the_transport_counts_as_a_board_in_use() {
-        use async_hid::HidError;
-
-        assert!(refused_as_busy(&HidError::Busy));
-        assert!(!refused_as_busy(&HidError::message(
-            "Failed to open device"
-        )));
-        assert!(!refused_as_busy(&HidError::NotConnected));
-        assert!(!refused_as_busy(&HidError::Unsupported));
-        assert!(!refused_as_busy(&os_error(
-            std::io::ErrorKind::PermissionDenied
-        )));
-    }
-
-    #[test]
-    fn the_hidraw_node_is_read_from_sysfs() {
-        let sysfs = FakeSysfs::new("node");
-        sysfs.file(
-            "hidraw/hidraw3/uevent",
-            "MAJOR=241\nMINOR=3\nDEVNAME=hidraw3",
-        );
-
-        assert_eq!(
-            hidraw_node(&sysfs.0.join("hidraw/hidraw3")),
-            Some(std::path::PathBuf::from("/dev/hidraw3"))
-        );
-    }
-
-    #[test]
-    fn a_node_name_that_is_not_hidraw_is_refused() {
-        let sysfs = FakeSysfs::new("badnode");
-        sysfs
-            .file("a/uevent", "DEVNAME=../sda")
-            .file("b/uevent", "DEVNAME=hidraw")
-            .file("c/uevent", "DEVNAME=hidraw1/../../sda")
-            .file("d/uevent", "MAJOR=241");
-
-        for dir in ["a", "b", "c", "d", "missing"] {
-            assert_eq!(hidraw_node(&sysfs.0.join(dir)), None, "{dir}");
-        }
-    }
-
     /// Needs a YKUR attached. Run with `cargo test -- --ignored --test-threads=1`.
     mod hardware {
         use super::*;
@@ -993,168 +609,5 @@ mod tests {
                 Err(Error::NotFound { serial: Some(_) })
             ));
         }
-    }
-}
-
-#[cfg(test)]
-mod waiting_tests {
-    use std::cell::Cell;
-    use std::path::{Path, PathBuf};
-
-    use async_hid::HidError;
-
-    use super::{NodeWait, Seize};
-    use crate::error::Error;
-    use crate::lock::Attempt;
-
-    fn not_found() -> crate::error::Result<&'static str> {
-        Err(Error::NotFound { serial: None })
-    }
-
-    fn unused<R>() -> R {
-        panic!("not expected in this attempt")
-    }
-
-    fn outcome<T>(attempt: Attempt<T>) -> &'static str {
-        match attempt {
-            Attempt::Got(_) => "got",
-            Attempt::Busy(_) => "busy",
-            Attempt::Gone(_) => "gone",
-            Attempt::Failed(_) => "failed",
-        }
-    }
-
-    // -- macOS: the seized handle ------------------------------------------
-
-    #[test]
-    fn an_open_failure_before_the_board_was_busy_fails_at_once() {
-        let mut seize = Seize::new("old", "held");
-
-        let attempt = seize.attempt(unused, |_| Err::<(), _>(HidError::message("x")));
-
-        assert_eq!(outcome(attempt), "failed");
-    }
-
-    #[test]
-    fn a_board_reset_while_held_elsewhere_is_found_again() {
-        let mut seize = Seize::new("old", "held");
-        let opened = Cell::new(None);
-
-        let busy = seize.attempt(unused, |_| Err::<(), _>(HidError::Busy));
-        let vanished = seize.attempt(unused, |_| Err::<(), _>(HidError::message("gone")));
-        let missing = seize.attempt(not_found, |_| unused());
-        let back = seize.attempt(
-            || Ok("new"),
-            |device| {
-                opened.set(Some(*device));
-                Ok(())
-            },
-        );
-
-        let seen = [busy, vanished, missing, back].map(outcome);
-        assert_eq!(seen, ["busy", "gone", "gone", "got"]);
-        assert_eq!(opened.get(), Some("new"));
-    }
-
-    #[test]
-    fn a_board_gone_at_the_first_open_is_looked_for_again() {
-        let mut seize = Seize::new("old", "held");
-
-        let gone = seize.attempt(unused, |_| Err::<(), _>(HidError::NotConnected));
-        let back = seize.attempt(|| Ok("new"), |_| Ok(()));
-
-        assert_eq!([gone, back].map(outcome), ["gone", "got"]);
-    }
-
-    // -- FreeBSD: one open per node -----------------------------------------
-
-    fn board() -> Option<(String, PathBuf)> {
-        Some(("YK1".to_owned(), PathBuf::from("/dev/hidraw3")))
-    }
-
-    #[test]
-    fn a_board_neither_listed_nor_in_sysctl_is_not_found_at_once() {
-        let mut wait = NodeWait::default();
-
-        let attempt = wait.attempt(
-            not_found,
-            || None,
-            |_, _| unused(),
-            |_| unused::<Result<(), _>>(),
-            "held",
-        );
-
-        assert!(matches!(attempt, Attempt::Failed(Error::NotFound { .. })));
-    }
-
-    #[test]
-    fn a_held_board_is_asked_for_by_its_node_only() {
-        let mut wait = NodeWait::default();
-        let asked = Cell::new(0);
-        let node = |path: &Path, serial: &str| {
-            assert_eq!((path, serial), (Path::new("/dev/hidraw3"), "YK1"));
-            asked.set(asked.get() + 1);
-            Err::<&str, _>(HidError::Busy)
-        };
-
-        let first = wait.attempt(
-            not_found,
-            board,
-            node,
-            |_| unused::<Result<(), _>>(),
-            "held",
-        );
-        let second = wait.attempt(unused, unused, node, |_| unused::<Result<(), _>>(), "held");
-
-        assert_eq!([first, second].map(outcome), ["busy", "busy"]);
-        assert_eq!(asked.get(), 2);
-    }
-
-    #[test]
-    fn a_board_that_left_its_node_is_waited_for_until_it_is_back() {
-        let mut wait = NodeWait::default();
-
-        let held = wait.attempt(
-            not_found,
-            board,
-            |_, _| Err::<&str, _>(HidError::Busy),
-            |_| unused::<Result<(), _>>(),
-            "held",
-        );
-        let left = wait.attempt(
-            unused,
-            unused,
-            |_, _| Err::<&str, _>(HidError::NotConnected),
-            |_| unused::<Result<(), _>>(),
-            "held",
-        );
-        let missing = wait.attempt(
-            not_found,
-            || None,
-            |_, _| unused(),
-            |_| unused::<Result<(), _>>(),
-            "held",
-        );
-        let back = wait.attempt(|| Ok("new"), unused, |_, _| unused(), |_| Ok(()), "held");
-
-        assert_eq!(
-            [held, left, missing, back].map(outcome),
-            ["busy", "gone", "gone", "got"]
-        );
-    }
-
-    #[test]
-    fn a_listed_board_that_is_gone_at_the_open_is_waited_for() {
-        let mut wait = NodeWait::default();
-
-        let attempt = wait.attempt(
-            || Ok("old"),
-            unused,
-            |_, _| unused(),
-            |_| Err::<(), _>(HidError::NotConnected),
-            "held",
-        );
-
-        assert_eq!(outcome(attempt), "gone");
     }
 }

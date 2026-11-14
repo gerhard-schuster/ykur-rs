@@ -196,7 +196,10 @@ directly:
 Line by line, `llvm-cov show` lists 53 unreached lines for the run with the board: 45 in the
 library and the binary, 8 in tests. `llvm-cov report` counts 10 more, 8 in `lock.rs` and 2 in
 `device.rs`. For `lock.rs` the generic functions are counted per instantiation; for the 2 lines
-in `device.rs` the cause is UNKNOWN. The 45 lines are:
+in `device.rs` the cause is UNKNOWN. Since these runs, `device.rs` has been split into
+`src/device/`. Of the places named `device.rs` below, the exchange and the reads are now in
+`device/mod.rs`, the missing hidraw node in `device/linux.rs`; the refused open had already moved
+to the conversion of transport errors in `error.rs` before that. The 45 lines are:
 
 | Place | Why it is not reached |
 |---|---|
