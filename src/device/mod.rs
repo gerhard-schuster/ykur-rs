@@ -104,7 +104,9 @@ impl Board {
     /// Opens the board with the given serial number, or the first one found.
     ///
     /// A board another invocation is using is waited for, up to
-    /// [`DEFAULT_WAIT`]; see [`crate::lock`].
+    /// [`DEFAULT_WAIT`]. The turn is an advisory lock on the hidraw node on
+    /// Linux, and the open itself on macOS (exclusive) and FreeBSD (one open
+    /// per node).
     pub fn open(serial: Option<&str>) -> Result<Self> {
         Board::open_within(serial, DEFAULT_WAIT)
     }
