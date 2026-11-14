@@ -7,9 +7,10 @@
 //! or a careless paste brings those in, and they are invisible in a diff until
 //! a terminal or a toolchain trips over them.
 //!
-//! Three Latin-1 characters are rejected anyway, because they are invisible or
-//! steer a terminal: the C1 controls, the no-break space and the soft hyphen.
-//! They are the same characters `sanitize()` keeps out of the program's output.
+//! Four groups of Latin-1 characters are rejected anyway, because they are
+//! invisible or steer a terminal: the C0 controls (except tab and newline,
+//! including `0x7F`), the C1 controls, the no-break space and the soft
+//! hyphen.
 //!
 //! Written as a test rather than a script so it needs nothing the build does
 //! not already need, and so the rule itself can be tested. The file list comes
@@ -89,6 +90,7 @@ fn check(bytes: &[u8]) -> Option<Reject> {
         col += 1;
 
         let what = match ch as u32 {
+            0x0000..=0x0008 | 0x000B..=0x001F | 0x007F => "C0 control",
             0x00A0 => "no-break space",
             0x00AD => "soft hyphen",
             0x0080..=0x009F => "C1 control",
@@ -164,7 +166,7 @@ fn every_file_is_valid_utf8_within_latin1() {
 
 #[test]
 fn ascii_and_umlauts_are_accepted() {
-    assert_eq!(check(b"plain ascii\n"), None);
+    assert_eq!(check(b"plain\tascii ~\n"), None);
     assert_eq!(
         check("Umlaute \u{e4}\u{f6}\u{fc}\u{c4}\u{d6}\u{dc}\u{df}\n".as_bytes()),
         None
@@ -200,9 +202,18 @@ fn typography_is_rejected_with_its_position() {
 #[test]
 fn invisible_latin1_characters_are_rejected() {
     for (ch, what) in [
+        ('\u{00}', "C0 control"),
+        ('\u{08}', "C0 control"),
+        ('\u{0b}', "C0 control"),
+        ('\r', "C0 control"),
+        ('\u{1b}', "C0 control"),
+        ('\u{1f}', "C0 control"),
+        ('\u{7f}', "C0 control"),
+        ('\u{80}', "C1 control"),
+        ('\u{9b}', "C1 control"),
+        ('\u{9f}', "C1 control"),
         ('\u{a0}', "no-break space"),
         ('\u{ad}', "soft hyphen"),
-        ('\u{9b}', "C1 control"),
     ] {
         let text = format!("a{ch}b");
         assert_eq!(
@@ -217,6 +228,15 @@ fn invisible_latin1_characters_are_rejected() {
             ch as u32
         );
     }
+    assert_eq!(
+        check(b"first\r\nsecond\n"),
+        Some(Reject::Invisible {
+            line: 1,
+            col: 6,
+            ch: '\r',
+            what: "C0 control"
+        })
+    );
 }
 
 #[test]
