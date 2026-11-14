@@ -4,6 +4,7 @@
 cargo test                                  # has to pass
 cargo clippy --all-targets -- -D warnings   # has to be silent
 cargo fmt --check
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps   # has to be silent
 cargo test -- --ignored --test-threads=1    # only with a board attached
 ```
 
